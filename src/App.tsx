@@ -1,11 +1,51 @@
-import './App.css'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
+
+import Navbar from './components/Navbar'
+import Hero from './components/Hero'
+import Tools from './components/Tools'
+import Plans from './components/Plans'
+import HowItWorks from './components/HowItWorks'
+
+import Login from './pages/Login'
+import Portal from './pages/Portal'
+import ProtectedRoute from './components/ProtectedRoute'
+
+
+function Home() {
+  return (
+    <div className="min-h-screen bg-black">
+      <Navbar />
+      <Hero />
+      <Tools />
+      <Plans />
+      <HowItWorks />
+    </div>
+  )
+}
+
 
 function App() {
   return (
-    <div>
-      <h1>AI Tools Portal</h1>
-      <p>Claude, GPT, Grok, Gemini and Perplexity in one place.</p>
-    </div>
+    <BrowserRouter>
+
+      <Routes>
+
+        <Route path="/" element={<Home />} />
+
+        <Route path="/login" element={<Login />} />
+
+        <Route
+          path="/portal"
+          element={
+            <ProtectedRoute>
+              <Portal />
+            </ProtectedRoute>
+          }
+        />
+
+      </Routes>
+
+    </BrowserRouter>
   )
 }
 
