@@ -10,26 +10,24 @@ export async function onRequestGet(
   context: FunctionContext
 ): Promise<Response> {
   try {
-    // Confirms that Cloudflare can see the encrypted secret.
-    // The actual key is never returned.
-    if (!context.env.PERPLEXITY_API_KEY) {
+    const apiKey = context.env.PERPLEXITY_API_KEY?.trim()
+
+    if (!apiKey) {
       return Response.json(
         {
           success: false,
-          error: 'PERPLEXITY_API_KEY is not available in Cloudflare.',
+          error: 'PERPLEXITY_API_KEY is missing in Cloudflare.',
         },
         { status: 500 }
       )
     }
 
-    // Perplexity's model-discovery endpoint currently requires no
-    // authentication. We still verify the secret above because later
-    // chat requests will require it.
     const perplexityResponse = await fetch(
       'https://api.perplexity.ai/v1/models',
       {
         method: 'GET',
         headers: {
+          Authorization: `Bearer ${apiKey}`,
           Accept: 'application/json',
         },
       }
@@ -54,7 +52,6 @@ export async function onRequestGet(
     return Response.json(
       {
         success: true,
-        secretConfigured: true,
         models: modelData,
       },
       {
@@ -64,13 +61,13 @@ export async function onRequestGet(
       }
     )
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Unknown server error'
-
     return Response.json(
       {
         success: false,
-        error: message,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Unknown server error',
       },
       { status: 500 }
     )
