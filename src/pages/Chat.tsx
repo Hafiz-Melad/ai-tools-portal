@@ -1,10 +1,20 @@
-import { useEffect, useState } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
+
 import type {
   FormEvent,
   KeyboardEvent,
 } from 'react'
 
-import { useNavigate, useParams } from 'react-router-dom'
+import {
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router-dom'
+
 import { supabase } from '../lib/supabase'
 
 type AIModel = {
@@ -32,20 +42,60 @@ type ChatApiResponse = {
   providerCostUsd?: number
 }
 
+type HistoryConversation = {
+  id: string
+  title: string | null
+  model_id: string
+  created_at: string
+}
+
+type HistoryMessage = {
+  id: string
+  role: string
+  content: string
+  created_at: string
+}
+
+type HistoryApiResponse = {
+  success: boolean
+  error?: string
+  conversation?: HistoryConversation
+  messages?: HistoryMessage[]
+}
+
 const CHAT_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/chat'
   : '/api/chat'
+
+const HISTORY_API_URL = import.meta.env.DEV
+  ? 'https://ai-tools-portal-9h5.pages.dev/api/history'
+  : '/api/history'
 
 function Chat() {
   const { modelId } = useParams()
   const navigate = useNavigate()
 
-  const [model, setModel] = useState<AIModel | null>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [searchParams, setSearchParams] =
+    useSearchParams()
+
+  const conversationFromUrl =
+    searchParams.get('conversation')?.trim() || null
+
+  const messagesEndRef =
+    useRef<HTMLDivElement | null>(null)
+
+  const [model, setModel] =
+    useState<AIModel | null>(null)
+
+  const [messages, setMessages] =
+    useState<ChatMessage[]>([])
+
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(true)
   const [sending, setSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+
+  const [error, setError] =
+    useState<string | null>(null)
 
   const [conversationId, setConversationId] =
     useState<string | null>(null)
@@ -57,19 +107,20 @@ function Chat() {
     useState<number | null>(null)
 
   useEffect(() => {
-    async function loadModel() {
+    async function loadChatPage() {
       setLoading(true)
       setError(null)
       setModel(null)
       setMessages([])
-      setMessage('')
       setConversationId(null)
       setCreditsRemaining(null)
       setLastCreditsUsed(null)
 
       try {
         if (!modelId) {
-          throw new Error('No AI model was selected.')
+          throw new Error(
+            'No AI model was selected.'
+          )
         }
 
         const {
@@ -82,11 +133,13 @@ function Chat() {
         }
 
         if (!user) {
-          throw new Error('You must log in first.')
+          throw new Error(
+            'You must log in first.'
+          )
         }
 
         /*
-         * Load the customer's current credit balance.
+         * Load the current credit balance.
          */
         const {
           data: profileData,
@@ -101,7 +154,9 @@ function Chat() {
           throw profileError
         }
 
-        if (typeof profileData.credits !== 'number') {
+        if (
+          typeof profileData.credits !== 'number'
+        ) {
           throw new Error(
             'Your credit balance could not be loaded.'
           )
@@ -110,7 +165,7 @@ function Chat() {
         setCreditsRemaining(profileData.credits)
 
         /*
-         * Load the customer's active subscription.
+         * Load the active subscription.
          */
         const {
           data: subscription,
@@ -127,7 +182,9 @@ function Chat() {
         }
 
         if (!subscription) {
-          throw new Error('No subscription was found.')
+          throw new Error(
+            'No subscription was found.'
+          )
         }
 
         if (subscription.status !== 'active') {
@@ -137,7 +194,7 @@ function Chat() {
         }
 
         /*
-         * Verify that the selected model belongs to the plan.
+         * Verify that the model belongs to the plan.
          */
         const {
           data: modelAccess,
@@ -180,21 +237,120 @@ function Chat() {
         }
 
         setModel(selectedModel)
+
+        /*
+         * When the URL contains a conversation ID,
+         * load its saved messages.
+         */
+        if (conversationFromUrl) {
+          const {
+            data: { session },
+            error: sessionError,
+          } = await supabase.auth.getSession()
+
+          if (sessionError) {
+            throw sessionError
+          }
+
+          if (!session?.access_token) {
+            throw new Error(
+              'Your login session has expired.'
+            )
+          }
+
+          const historyResponse = await fetch(
+            `${HISTORY_API_URL}?conversationId=${encodeURIComponent(
+              conversationFromUrl
+            )}`,
+            {
+              method: 'GET',
+              headers: {
+                Authorization:
+                  `Bearer ${session.access_token}`,
+              },
+            }
+          )
+
+          let historyResult: HistoryApiResponse
+
+          try {
+            historyResult =
+              (await historyResponse.json()) as
+                HistoryApiResponse
+          } catch {
+            throw new Error(
+              'The history server returned an invalid response.'
+            )
+          }
+
+          if (
+            !historyResponse.ok ||
+            !historyResult.success
+          ) {
+            throw new Error(
+              historyResult.error ||
+                'Could not load the conversation.'
+            )
+          }
+
+          if (!historyResult.conversation) {
+            throw new Error(
+              'The conversation was not found.'
+            )
+          }
+
+          if (
+            historyResult.conversation.model_id !==
+            selectedModel.id
+          ) {
+            throw new Error(
+              'This conversation belongs to another AI model.'
+            )
+          }
+
+          const restoredMessages: ChatMessage[] =
+            (historyResult.messages ?? [])
+              .filter(
+                (savedMessage) =>
+                  savedMessage.role === 'user' ||
+                  savedMessage.role === 'assistant'
+              )
+              .map((savedMessage) => ({
+                id: savedMessage.id,
+                role:
+                  savedMessage.role as
+                    | 'user'
+                    | 'assistant',
+                content: savedMessage.content,
+              }))
+
+          setMessages(restoredMessages)
+
+          setConversationId(
+            historyResult.conversation.id
+          )
+        }
       } catch (err) {
         console.error(err)
 
         setError(
           err instanceof Error
             ? err.message
-            : 'Could not load the selected model.'
+            : 'Could not load the chat.'
         )
       } finally {
         setLoading(false)
       }
     }
 
-    void loadModel()
-  }, [modelId])
+    void loadChatPage()
+  }, [modelId, conversationFromUrl])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: 'smooth',
+    })
+  }, [messages, sending])
 
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault()
@@ -286,11 +442,10 @@ function Chat() {
         )
       }
 
-      /*
-       * The first response creates the conversation.
-       * Later requests reuse the same conversation ID.
-       */
-      setConversationId(result.conversationId)
+      const returnedConversationId =
+        result.conversationId.trim()
+
+      setConversationId(returnedConversationId)
 
       if (
         typeof result.creditsRemaining === 'number'
@@ -300,8 +455,12 @@ function Chat() {
         )
       }
 
-      if (typeof result.creditsUsed === 'number') {
-        setLastCreditsUsed(result.creditsUsed)
+      if (
+        typeof result.creditsUsed === 'number'
+      ) {
+        setLastCreditsUsed(
+          result.creditsUsed
+        )
       }
 
       const assistantMessage: ChatMessage = {
@@ -314,6 +473,25 @@ function Chat() {
         ...currentMessages,
         assistantMessage,
       ])
+
+      /*
+       * Put the conversation ID in the URL.
+       * This allows refresh and browser history to work.
+       */
+      if (
+        conversationFromUrl !==
+        returnedConversationId
+      ) {
+        setSearchParams(
+          {
+            conversation:
+              returnedConversationId,
+          },
+          {
+            replace: true,
+          }
+        )
+      }
     } catch (err) {
       console.error(err)
 
@@ -349,10 +527,20 @@ function Chat() {
     }
   }
 
+  function startNewChat() {
+    setMessages([])
+    setMessage('')
+    setConversationId(null)
+    setError(null)
+    setLastCreditsUsed(null)
+
+    setSearchParams({}, { replace: true })
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        Loading model...
+        Loading chat...
       </div>
     )
   }
@@ -389,13 +577,24 @@ function Chat() {
     <div className="min-h-screen bg-black text-white flex flex-col">
       <header className="border-b border-white/10 px-6 py-4">
         <div className="max-w-5xl w-full mx-auto flex items-center justify-between gap-6">
-          <button
-            type="button"
-            onClick={() => navigate('/portal')}
-            className="text-gray-300 hover:text-white"
-          >
-            ← Back to Portal
-          </button>
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() => navigate('/portal')}
+              className="text-gray-300 hover:text-white"
+            >
+              ← Back to Portal
+            </button>
+
+            <button
+              type="button"
+              onClick={startNewChat}
+              disabled={sending}
+              className="border border-white/15 rounded-xl px-4 py-2 text-sm hover:bg-white/5 disabled:opacity-50"
+            >
+              + New Chat
+            </button>
+          </div>
 
           <div className="text-right">
             <h1 className="font-bold">
@@ -425,6 +624,12 @@ function Chat() {
           <p className="text-gray-400 mt-2">
             {model.description}
           </p>
+
+          {conversationId && (
+            <p className="text-xs text-gray-600 mt-2">
+              Conversation saved
+            </p>
+          )}
         </div>
 
         <div className="flex-1 min-h-[420px] border border-white/10 rounded-2xl p-5 overflow-y-auto space-y-5">
@@ -466,6 +671,8 @@ function Chat() {
               </div>
             </div>
           )}
+
+          <div ref={messagesEndRef} />
         </div>
 
         {error && (
