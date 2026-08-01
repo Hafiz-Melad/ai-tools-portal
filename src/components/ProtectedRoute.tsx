@@ -1,30 +1,75 @@
-import { Navigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import {
+  useEffect,
+  useState,
+  type ReactNode,
+} from 'react'
+
+import {
+  Navigate,
+} from 'react-router-dom'
+
+import type {
+  Session,
+} from '@supabase/supabase-js'
+
 import { supabase } from '../lib/supabase'
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+type ProtectedRouteProps = {
+  children: ReactNode
+}
 
+function ProtectedRoute({
+  children,
+}: ProtectedRouteProps) {
   const [loading, setLoading] = useState(true)
-  const [session, setSession] = useState<any>(null)
 
+  const [session, setSession] =
+    useState<Session | null>(null)
 
   useEffect(() => {
+    let mounted = true
 
     async function checkSession() {
-
       const {
-        data: { session }
+        data,
+        error,
       } = await supabase.auth.getSession()
 
-      setSession(session)
-      setLoading(false)
+      if (!mounted) {
+        return
+      }
 
+      if (error) {
+        console.error(
+          'Session check failed:',
+          error
+        )
+      }
+
+      setSession(data.session)
+      setLoading(false)
     }
 
-    checkSession()
+    void checkSession()
 
+    const {
+      data: authListener,
+    } = supabase.auth.onAuthStateChange(
+      (_event, nextSession) => {
+        if (!mounted) {
+          return
+        }
+
+        setSession(nextSession)
+        setLoading(false)
+      }
+    )
+
+    return () => {
+      mounted = false
+      authListener.subscription.unsubscribe()
+    }
   }, [])
-
 
   if (loading) {
     return (
@@ -34,13 +79,16 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
     )
   }
 
-
   if (!session) {
-    return <Navigate to="/login" />
+    return (
+      <Navigate
+        to="/login"
+        replace
+      />
+    )
   }
 
-
-  return children
+  return <>{children}</>
 }
 
 export default ProtectedRoute

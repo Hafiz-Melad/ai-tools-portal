@@ -103,8 +103,27 @@ function Chat() {
   const [creditsRemaining, setCreditsRemaining] =
     useState<number | null>(null)
 
+  const [subscriptionStatus, setSubscriptionStatus] =
+    useState<string | null>(null)
+
   const [lastCreditsUsed, setLastCreditsUsed] =
     useState<number | null>(null)
+
+  const hasCredits =
+    typeof creditsRemaining === 'number' &&
+    creditsRemaining > 0
+
+  const subscriptionIsActive =
+    subscriptionStatus === 'active'
+
+  const canSendMessages =
+    hasCredits && subscriptionIsActive
+
+  const accessMessage = !hasCredits
+    ? 'You have no remaining credits. Add credits to continue chatting.'
+    : !subscriptionIsActive
+      ? 'Your subscription is inactive. Add credits to reactivate chat access.'
+      : null
 
   useEffect(() => {
     async function loadChatPage() {
@@ -114,6 +133,7 @@ function Chat() {
       setMessages([])
       setConversationId(null)
       setCreditsRemaining(null)
+      setSubscriptionStatus(null)
       setLastCreditsUsed(null)
 
       try {
@@ -165,7 +185,8 @@ function Chat() {
         setCreditsRemaining(profileData.credits)
 
         /*
-         * Load the active subscription.
+         * Load the subscription. Inactive subscriptions may still
+         * read saved history, but they cannot send new messages.
          */
         const {
           data: subscription,
@@ -187,11 +208,7 @@ function Chat() {
           )
         }
 
-        if (subscription.status !== 'active') {
-          throw new Error(
-            'Your subscription is not active.'
-          )
-        }
+        setSubscriptionStatus(subscription.status)
 
         /*
          * Verify that the model belongs to the plan.
@@ -365,6 +382,14 @@ function Chat() {
       return
     }
 
+    if (!canSendMessages) {
+      setError(
+        accessMessage ||
+          'Chat access is currently unavailable.'
+      )
+      return
+    }
+
     setError(null)
     setSending(true)
     setMessage('')
@@ -453,6 +478,10 @@ function Chat() {
         setCreditsRemaining(
           result.creditsRemaining
         )
+
+        if (result.creditsRemaining <= 0) {
+          setSubscriptionStatus('inactive')
+        }
       }
 
       if (
@@ -606,7 +635,13 @@ function Chat() {
             </p>
 
             {creditsRemaining !== null && (
-              <p className="text-sm text-green-400 mt-1">
+              <p
+                className={
+                  creditsRemaining > 0
+                    ? 'text-sm text-green-400 mt-1'
+                    : 'text-sm text-yellow-300 mt-1'
+                }
+              >
                 {creditsRemaining.toLocaleString()}{' '}
                 credits remaining
               </p>
@@ -634,9 +669,11 @@ function Chat() {
 
         <div className="flex-1 min-h-[420px] border border-white/10 rounded-2xl p-5 overflow-y-auto space-y-5">
           {messages.length === 0 && (
-            <div className="h-full min-h-[370px] flex items-center justify-center">
+            <div className="h-full min-h-[370px] flex items-center justify-center text-center px-6">
               <p className="text-gray-500">
-                Send your first message to {model.name}.
+                {canSendMessages
+                  ? `Send your first message to ${model.name}.`
+                  : 'Your saved conversations remain available. Add credits to continue chatting.'}
               </p>
             </div>
           )}
@@ -689,6 +726,26 @@ function Chat() {
           </p>
         )}
 
+        {!canSendMessages && accessMessage && (
+          <div className="mt-6 border border-yellow-500/30 bg-yellow-500/10 rounded-2xl p-5">
+            <h3 className="font-bold text-yellow-200">
+              Chat access paused
+            </h3>
+
+            <p className="text-sm text-yellow-100/80 mt-2">
+              {accessMessage}
+            </p>
+
+            <button
+              type="button"
+              onClick={() => navigate('/portal')}
+              className="mt-4 rounded-xl border border-yellow-200/20 px-4 py-2 text-sm font-semibold text-yellow-100 transition hover:bg-yellow-100/10"
+            >
+              Return to Portal
+            </button>
+          </div>
+        )}
+
         <form
           onSubmit={sendMessage}
           className="mt-6 flex gap-3"
@@ -699,17 +756,23 @@ function Chat() {
               setMessage(event.target.value)
             }
             onKeyDown={handleKeyDown}
-            placeholder={`Message ${model.name}...`}
+            placeholder={
+              canSendMessages
+                ? `Message ${model.name}...`
+                : 'Add credits to continue chatting.'
+            }
             rows={3}
             maxLength={10000}
-            disabled={sending}
+            disabled={sending || !canSendMessages}
             className="flex-1 resize-none bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-white/30 disabled:opacity-60"
           />
 
           <button
             type="submit"
             disabled={
-              sending || !message.trim()
+              sending ||
+              !canSendMessages ||
+              !message.trim()
             }
             className="self-end bg-white text-black px-7 py-4 rounded-2xl font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -718,7 +781,9 @@ function Chat() {
         </form>
 
         <p className="text-xs text-gray-600 mt-3">
-          Press Enter to send. Use Shift + Enter for a new line.
+          {canSendMessages
+            ? 'Press Enter to send. Use Shift + Enter for a new line.'
+            : 'Chat history is still readable while access is inactive.'}
         </p>
       </main>
     </div>
