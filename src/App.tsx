@@ -1,15 +1,19 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+} from 'react-router-dom'
 
 import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import Tools from './components/Tools'
 import Plans from './components/Plans'
 import HowItWorks from './components/HowItWorks'
+import ProtectedRoute from './components/ProtectedRoute'
 
 import Login from './pages/Login'
 import Portal from './pages/Portal'
-import ProtectedRoute from './components/ProtectedRoute'
-
+import Chat from './pages/Chat'
 
 function Home() {
   return (
@@ -23,13 +27,10 @@ function Home() {
   )
 }
 
-
 function App() {
   return (
     <BrowserRouter>
-
       <Routes>
-
         <Route path="/" element={<Home />} />
 
         <Route path="/login" element={<Login />} />
@@ -43,8 +44,15 @@ function App() {
           }
         />
 
+        <Route
+          path="/chat/:modelId"
+          element={
+            <ProtectedRoute>
+              <Chat />
+            </ProtectedRoute>
+          }
+        />
       </Routes>
-
     </BrowserRouter>
   )
 }
