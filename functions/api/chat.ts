@@ -16,6 +16,11 @@ type ChatRequest = {
   message?: string
 }
 
+type CreditResult = {
+  success: boolean
+  credits_remaining: number
+}
+
 type AgentResponse = {
   id?: string
   model?: string
@@ -50,6 +55,12 @@ const allowedOrigins = [
   'http://localhost:5174',
   'https://ai-tools-portal-9h5.pages.dev',
 ]
+
+/*
+ * 10,000 customer credits represent $1 of API usage.
+ * One credit therefore represents $0.0001.
+ */
+const CREDITS_PER_USD = 10_000
 
 function requireEnv(
   value: string | undefined,
@@ -248,7 +259,7 @@ export async function onRequestPost(
       )
     }
 
-    if (message.length > 10000) {
+    if (message.length > 10_000) {
       return jsonResponse(
         context.request,
         {
@@ -400,6 +411,15 @@ export async function onRequestPost(
       )
     }
 
+    if (
+      typeof selectedModel.model_key !== 'string' ||
+      !selectedModel.model_key.trim()
+    ) {
+      throw new Error(
+        'The selected model does not have a valid provider model key.'
+      )
+    }
+
     /*
      * Verify that the model belongs to the customer's plan.
      */
@@ -499,9 +519,65 @@ export async function onRequestPost(
     }
 
     /*
-     * Credit deduction and message storage are deliberately
-     * added after the basic API connection is verified.
+     * Convert the exact provider cost into customer credits.
+     * Every successful response costs at least one credit.
      */
+    const providerCostUsd = Number(
+      agentResponse.usage?.cost?.total_cost ?? 0
+    )
+
+    if (
+      !Number.isFinite(providerCostUsd) ||
+      providerCostUsd < 0
+    ) {
+      throw new Error(
+        'The AI provider returned invalid usage-cost information.'
+      )
+    }
+
+    const creditsUsed = Math.max(
+      1,
+      Math.ceil(providerCostUsd * CREDITS_PER_USD)
+    )
+
+    /*
+     * Atomically deduct credits and record the transaction.
+     */
+    const {
+      data: creditRows,
+      error: creditError,
+    } = await supabaseAdmin.rpc('consume_credits', {
+      p_user_id: user.id,
+      p_amount: creditsUsed,
+      p_model_id: selectedModel.id,
+      p_description:
+        `${selectedModel.name} usage — $${providerCostUsd.toFixed(6)}`,
+    })
+
+    if (creditError) {
+      throw new Error(
+        `Could not deduct credits: ${creditError.message}`
+      )
+    }
+
+    const creditResult = (
+      Array.isArray(creditRows)
+        ? creditRows[0]
+        : creditRows
+    ) as CreditResult | null
+
+    if (!creditResult?.success) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            'Your remaining balance is insufficient for this request.',
+        },
+        402
+      )
+    }
+
     return jsonResponse(context.request, {
       success: true,
       responseId: agentResponse.id ?? null,
@@ -513,7 +589,10 @@ export async function onRequestPost(
       },
       reply,
       usage: agentResponse.usage ?? null,
-      creditsRemaining: profile.credits,
+      providerCostUsd,
+      creditsUsed,
+      creditsRemaining:
+        creditResult.credits_remaining,
     })
   } catch (error) {
     const message =

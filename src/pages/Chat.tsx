@@ -1,4 +1,9 @@
 import { useEffect, useState } from 'react'
+import type {
+  FormEvent,
+  KeyboardEvent,
+} from 'react'
+
 import { useNavigate, useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -11,12 +16,32 @@ type AIModel = {
   enabled: boolean
 }
 
+type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+}
+
+type ChatApiResponse = {
+  success: boolean
+  reply?: string
+  error?: string
+  creditsRemaining?: number
+}
+
+const CHAT_API_URL = import.meta.env.DEV
+  ? 'https://ai-tools-portal-9h5.pages.dev/api/chat'
+  : '/api/chat'
+
 function Chat() {
   const { modelId } = useParams()
   const navigate = useNavigate()
 
   const [model, setModel] = useState<AIModel | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(true)
+  const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -79,9 +104,8 @@ function Chat() {
           throw modelError
         }
 
-        const selectedModel = modelAccess?.ai_models as unknown as
-          | AIModel
-          | null
+        const selectedModel =
+          modelAccess?.ai_models as unknown as AIModel | null
 
         if (!selectedModel) {
           throw new Error(
@@ -112,6 +136,122 @@ function Chat() {
     loadModel()
   }, [modelId])
 
+  async function sendMessage(event?: FormEvent) {
+    event?.preventDefault()
+
+    const cleanedMessage = message.trim()
+
+    if (
+      !cleanedMessage ||
+      !model ||
+      sending
+    ) {
+      return
+    }
+
+    setError(null)
+    setSending(true)
+    setMessage('')
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: cleanedMessage,
+    }
+
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      userMessage,
+    ])
+
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session?.access_token) {
+        throw new Error(
+          'Your login session has expired. Please log in again.'
+        )
+      }
+
+      const response = await fetch(CHAT_API_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          modelId: model.id,
+          message: cleanedMessage,
+        }),
+      })
+
+      const result =
+        (await response.json()) as ChatApiResponse
+
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.error || 'The AI request failed.'
+        )
+      }
+
+      if (!result.reply) {
+        throw new Error(
+          'The AI returned an empty response.'
+        )
+      }
+
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: result.reply,
+      }
+
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        assistantMessage,
+      ])
+    } catch (err) {
+      console.error(err)
+
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : 'Could not send the message.'
+
+      setError(errorMessage)
+
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: `Error: ${errorMessage}`,
+        },
+      ])
+    } finally {
+      setSending(false)
+    }
+  }
+
+  function handleKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (
+      event.key === 'Enter' &&
+      !event.shiftKey
+    ) {
+      event.preventDefault()
+      void sendMessage()
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
@@ -120,7 +260,7 @@ function Chat() {
     )
   }
 
-  if (error || !model) {
+  if (error && !model) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center px-6">
         <div className="max-w-md w-full border border-red-500/30 bg-red-500/10 rounded-2xl p-6">
@@ -129,7 +269,7 @@ function Chat() {
           </h1>
 
           <p className="text-red-200/80 mt-3">
-            {error || 'The selected model could not be loaded.'}
+            {error}
           </p>
 
           <button
@@ -144,10 +284,14 @@ function Chat() {
     )
   }
 
+  if (!model) {
+    return null
+  }
+
   return (
-    <div className="min-h-screen bg-black text-white">
+    <div className="min-h-screen bg-black text-white flex flex-col">
       <header className="border-b border-white/10 px-6 py-4">
-        <div className="max-w-5xl mx-auto flex items-center justify-between gap-6">
+        <div className="max-w-5xl w-full mx-auto flex items-center justify-between gap-6">
           <button
             type="button"
             onClick={() => navigate('/portal')}
@@ -168,7 +312,7 @@ function Chat() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-10">
+      <main className="max-w-5xl w-full mx-auto px-6 py-8 flex-1 flex flex-col">
         <div className="mb-6">
           <h2 className="text-3xl font-bold">
             Chat with {model.name}
@@ -179,30 +323,83 @@ function Chat() {
           </p>
         </div>
 
-        <div className="min-h-[400px] border border-white/10 rounded-2xl p-6">
-          <p className="text-gray-400">
-            Your conversation will appear here.
-          </p>
+        <div className="flex-1 min-h-[420px] border border-white/10 rounded-2xl p-5 overflow-y-auto space-y-5">
+          {messages.length === 0 && (
+            <div className="h-full min-h-[370px] flex items-center justify-center">
+              <p className="text-gray-500">
+                Send your first message to {model.name}.
+              </p>
+            </div>
+          )}
+
+          {messages.map((chatMessage) => (
+            <div
+              key={chatMessage.id}
+              className={
+                chatMessage.role === 'user'
+                  ? 'flex justify-end'
+                  : 'flex justify-start'
+              }
+            >
+              <div
+                className={
+                  chatMessage.role === 'user'
+                    ? 'max-w-[80%] rounded-2xl bg-white text-black px-5 py-4'
+                    : 'max-w-[80%] rounded-2xl bg-white/10 text-white px-5 py-4'
+                }
+              >
+                <p className="whitespace-pre-wrap">
+                  {chatMessage.content}
+                </p>
+              </div>
+            </div>
+          ))}
+
+          {sending && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl bg-white/10 px-5 py-4 text-gray-400">
+                {model.name} is thinking...
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="mt-6 flex gap-3">
+        {error && (
+          <div className="mt-4 border border-red-500/30 bg-red-500/10 text-red-300 rounded-xl px-4 py-3">
+            {error}
+          </div>
+        )}
+
+        <form
+          onSubmit={sendMessage}
+          className="mt-6 flex gap-3"
+        >
           <textarea
+            value={message}
+            onChange={(event) =>
+              setMessage(event.target.value)
+            }
+            onKeyDown={handleKeyDown}
             placeholder={`Message ${model.name}...`}
             rows={3}
-            className="flex-1 resize-none bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-white/30"
+            maxLength={10000}
+            disabled={sending}
+            className="flex-1 resize-none bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-white/30 disabled:opacity-60"
           />
 
           <button
-            type="button"
-            disabled
-            className="self-end bg-white/40 text-black px-7 py-4 rounded-2xl font-semibold cursor-not-allowed"
+            type="submit"
+            disabled={
+              sending || !message.trim()
+            }
+            className="self-end bg-white text-black px-7 py-4 rounded-2xl font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Send
+            {sending ? 'Sending...' : 'Send'}
           </button>
-        </div>
+        </form>
 
         <p className="text-xs text-gray-600 mt-3">
-          API messaging will be connected in the next step.
+          Press Enter to send. Use Shift + Enter for a new line.
         </p>
       </main>
     </div>
