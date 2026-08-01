@@ -328,7 +328,7 @@ export async function onRequestPost(
       error: profileError,
     } = await supabaseAdmin
       .from('profiles')
-      .select('id, credits, expiry_date')
+      .select('id, credits')
       .eq('id', user.id)
       .maybeSingle()
 
@@ -372,7 +372,7 @@ export async function onRequestPost(
       error: subscriptionError,
     } = await supabaseAdmin
       .from('subscriptions')
-      .select('plan_id, status, expires_at')
+      .select('plan_id, status')
       .eq('user_id', user.id)
       .limit(1)
       .maybeSingle()
@@ -403,27 +403,6 @@ export async function onRequestPost(
         },
         403
       )
-    }
-
-    const expiryDate =
-      subscription.expires_at ?? profile.expiry_date
-
-    if (expiryDate) {
-      const expiryTime = Date.parse(expiryDate)
-
-      if (
-        !Number.isNaN(expiryTime) &&
-        expiryTime <= Date.now()
-      ) {
-        return jsonResponse(
-          context.request,
-          {
-            success: false,
-            error: 'Your subscription has expired.',
-          },
-          403
-        )
-      }
     }
 
     /*
