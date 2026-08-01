@@ -22,8 +22,54 @@ type PerplexityModel = {
   }
 }
 
+type PerplexityModelsResponse = {
+  object?: string
+  data?: PerplexityModel[]
+}
+
+type SyncedModel = {
+  id: string
+  model_key: string
+}
+
+type PlanResult = {
+  id: string
+}
+
+function requireEnv(
+  value: string | undefined,
+  variableName: string
+): string {
+  const cleanedValue = value?.trim()
+
+  if (!cleanedValue) {
+    throw new Error(
+      `${variableName} is missing from the Cloudflare environment.`
+    )
+  }
+
+  return cleanedValue
+}
+
+function capitalize(value: string): string {
+  if (!value) return value
+
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
 function createDisplayName(modelId: string): string {
   const modelName = modelId.split('/').pop() || modelId
+
+  // Converts names such as claude-opus-4-5 to Claude Opus 4.5.
+  const claudeMatch = modelName.match(
+    /^claude-(haiku|sonnet|opus)-(\d+)-(\d+)$/i
+  )
+
+  if (claudeMatch) {
+    const [, family, major, minor] = claudeMatch
+
+    return `Claude ${capitalize(family)} ${major}.${minor}`
+  }
 
   return modelName
     .split('-')
@@ -32,11 +78,11 @@ function createDisplayName(modelId: string): string {
 
       if (lower === 'gpt') return 'GPT'
       if (lower === 'glm') return 'GLM'
-      if (lower === 'xai') return 'xAI'
       if (lower === 'ai') return 'AI'
+      if (lower === 'xai') return 'xAI'
       if (lower === 'nvidia') return 'NVIDIA'
 
-      return part.charAt(0).toUpperCase() + part.slice(1)
+      return capitalize(part)
     })
     .join(' ')
 }
@@ -51,7 +97,9 @@ function createProviderName(provider?: string): string {
     xai: 'xAI',
   }
 
-  if (!provider) return 'Unknown'
+  if (!provider) {
+    return 'Unknown'
+  }
 
   return providers[provider.toLowerCase()] || provider
 }
@@ -60,35 +108,32 @@ export async function onRequestPost(
   context: FunctionContext
 ): Promise<Response> {
   try {
-    const perplexityKey =
-      context.env.PERPLEXITY_API_KEY?.trim()
+    /*
+     * These values are now guaranteed to be strings.
+     * This removes the TypeScript red-line error.
+     */
+    const perplexityKey = requireEnv(
+      context.env.PERPLEXITY_API_KEY,
+      'PERPLEXITY_API_KEY'
+    )
 
-    const supabaseUrl =
-      context.env.SUPABASE_URL?.trim().replace(/\/$/, '')
+    const supabaseUrl = requireEnv(
+      context.env.SUPABASE_URL,
+      'SUPABASE_URL'
+    ).replace(/\/$/, '')
 
-    const supabaseSecretKey =
-      context.env.SUPABASE_SECRET_KEY?.trim()
+    const supabaseSecretKey = requireEnv(
+      context.env.SUPABASE_SECRET_KEY,
+      'SUPABASE_SECRET_KEY'
+    )
 
-    const expectedSyncSecret =
-      context.env.MODEL_SYNC_SECRET?.trim()
+    const expectedSyncSecret = requireEnv(
+      context.env.MODEL_SYNC_SECRET,
+      'MODEL_SYNC_SECRET'
+    )
 
     const receivedSyncSecret =
       context.request.headers.get('x-sync-secret')?.trim()
-
-    if (
-      !perplexityKey ||
-      !supabaseUrl ||
-      !supabaseSecretKey ||
-      !expectedSyncSecret
-    ) {
-      return Response.json(
-        {
-          success: false,
-          error: 'One or more required server secrets are missing.',
-        },
-        { status: 500 }
-      )
-    }
 
     if (
       !receivedSyncSecret ||
@@ -99,7 +144,12 @@ export async function onRequestPost(
           success: false,
           error: 'Unauthorized synchronization request.',
         },
-        { status: 401 }
+        {
+          status: 401,
+          headers: {
+            'Cache-Control': 'no-store',
+          },
+        }
       )
     }
 
@@ -107,18 +157,38 @@ export async function onRequestPost(
       path: string,
       options: RequestInit = {}
     ): Promise<Response> {
+      const headers = new Headers(options.headers)
+
+      /*
+       * Modern sb_secret_ keys are passed through apikey.
+       * Legacy service_role keys are JWTs and can also be
+       * placed in the Authorization header.
+       */
+      headers.set('apikey', supabaseSecretKey)
+      headers.set('Accept', 'application/json')
+
+      if (supabaseSecretKey.startsWith('sb_secret_')) {
+        headers.delete('Authorization')
+      } else {
+        headers.set(
+          'Authorization',
+          `Bearer ${supabaseSecretKey}`
+        )
+      }
+
+      if (options.body !== undefined && options.body !== null) {
+        headers.set('Content-Type', 'application/json')
+      }
+
       return fetch(`${supabaseUrl}/rest/v1/${path}`, {
         ...options,
-        headers: {
-          apikey: supabaseSecretKey,
-          Authorization: `Bearer ${supabaseSecretKey}`,
-          'Content-Type': 'application/json',
-          ...(options.headers || {}),
-        },
+        headers,
       })
     }
 
-    // Get the current live model catalog from Perplexity.
+    /*
+     * Retrieve the current model catalog from Perplexity.
+     */
     const perplexityResponse = await fetch(
       'https://api.perplexity.ai/v1/models',
       {
@@ -140,29 +210,44 @@ export async function onRequestPost(
           status: perplexityResponse.status,
           details: perplexityText,
         },
-        { status: 502 }
+        {
+          status: 502,
+          headers: {
+            'Cache-Control': 'no-store',
+          },
+        }
       )
     }
 
-    const perplexityResult = JSON.parse(perplexityText)
+    let perplexityResult: PerplexityModelsResponse
 
-    const liveModels: PerplexityModel[] =
-      perplexityResult.data || []
+    try {
+      perplexityResult = JSON.parse(
+        perplexityText
+      ) as PerplexityModelsResponse
+    } catch {
+      throw new Error(
+        'Perplexity returned an invalid JSON response.'
+      )
+    }
+
+    const liveModels = Array.isArray(perplexityResult.data)
+      ? perplexityResult.data
+      : []
 
     if (liveModels.length === 0) {
-      return Response.json(
-        {
-          success: false,
-          error: 'Perplexity returned no models.',
-        },
-        { status: 502 }
-      )
+      throw new Error('Perplexity returned no models.')
     }
 
-    // Temporarily disable the existing Perplexity-powered catalog.
-    // Models returned below will be re-enabled through the upsert.
+    /*
+     * Disable existing Perplexity-powered entries first.
+     * Models returned by the current catalog will be
+     * re-enabled during the upsert.
+     */
     const disableResponse = await supabaseRequest(
-      'ai_models?api_provider=eq.Perplexity',
+      `ai_models?api_provider=eq.${encodeURIComponent(
+        'Perplexity'
+      )}`,
       {
         method: 'PATCH',
         headers: {
@@ -190,7 +275,8 @@ export async function onRequestPost(
         name,
         provider,
         model_key: model.id,
-        description: `${name} provided through the Perplexity Agent API.`,
+        description:
+          `${name} provided through the Perplexity Agent API.`,
         enabled: true,
         api_provider: 'Perplexity',
         input_price: model.pricing?.input ?? 0,
@@ -205,7 +291,10 @@ export async function onRequestPost(
       }
     })
 
-    // Insert new models and update existing models by model_key.
+    /*
+     * Insert new models and update existing models using
+     * model_key as the unique conflict column.
+     */
     const upsertResponse = await supabaseRequest(
       'ai_models?on_conflict=model_key&select=id,model_key',
       {
@@ -226,14 +315,34 @@ export async function onRequestPost(
       )
     }
 
-    const synchronizedModels: Array<{
-      id: string
-      model_key: string
-    }> = JSON.parse(upsertText)
+    let synchronizedModels: SyncedModel[]
 
-    // Find the Mega AI plan.
+    try {
+      synchronizedModels = JSON.parse(
+        upsertText
+      ) as SyncedModel[]
+    } catch {
+      throw new Error(
+        'Supabase returned invalid model synchronization data.'
+      )
+    }
+
+    if (
+      !Array.isArray(synchronizedModels) ||
+      synchronizedModels.length === 0
+    ) {
+      throw new Error(
+        'No models were synchronized with Supabase.'
+      )
+    }
+
+    /*
+     * Find the Mega AI plan.
+     */
+    const megaPlanName = encodeURIComponent('Mega AI')
+
     const planResponse = await supabaseRequest(
-      'plans?select=id&name=eq.Mega%20AI&limit=1',
+      `plans?select=id&name=eq.${megaPlanName}&limit=1`,
       {
         method: 'GET',
       }
@@ -247,10 +356,17 @@ export async function onRequestPost(
       )
     }
 
-    const plans: Array<{ id: string }> =
-      JSON.parse(planText)
+    let plans: PlanResult[]
 
-    if (plans.length === 0) {
+    try {
+      plans = JSON.parse(planText) as PlanResult[]
+    } catch {
+      throw new Error(
+        'Supabase returned invalid Mega AI plan data.'
+      )
+    }
+
+    if (!Array.isArray(plans) || plans.length === 0) {
       throw new Error(
         'The Mega AI plan was not found in Supabase.'
       )
@@ -258,9 +374,13 @@ export async function onRequestPost(
 
     const megaPlanId = plans[0].id
 
-    // Remove the old Mega AI model assignments.
+    /*
+     * Remove previous Mega AI model assignments.
+     */
     const deleteMappingsResponse = await supabaseRequest(
-      `plan_models?plan_id=eq.${megaPlanId}`,
+      `plan_models?plan_id=eq.${encodeURIComponent(
+        megaPlanId
+      )}`,
       {
         method: 'DELETE',
         headers: {
@@ -275,14 +395,15 @@ export async function onRequestPost(
       )
     }
 
-    const modelMappings = synchronizedModels.map(
-      (model) => ({
-        plan_id: megaPlanId,
-        model_id: model.id,
-      })
-    )
+    const modelMappings = synchronizedModels.map((model) => ({
+      plan_id: megaPlanId,
+      model_id: model.id,
+    }))
 
-    // Connect every currently available model to Mega AI.
+    /*
+     * Assign every currently available Perplexity model
+     * to the Mega AI plan.
+     */
     const mappingResponse = await supabaseRequest(
       'plan_models?on_conflict=plan_id,model_id',
       {
@@ -304,13 +425,15 @@ export async function onRequestPost(
     return Response.json(
       {
         success: true,
-        message: 'Perplexity model synchronization completed.',
+        message:
+          'Perplexity model synchronization completed.',
         modelsReceived: liveModels.length,
         modelsSynchronized: synchronizedModels.length,
         megaPlanModelsAssigned: modelMappings.length,
         synchronizedAt: syncedAt,
       },
       {
+        status: 200,
         headers: {
           'Cache-Control': 'no-store',
         },
@@ -329,7 +452,12 @@ export async function onRequestPost(
         success: false,
         error: message,
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          'Cache-Control': 'no-store',
+        },
+      }
     )
   }
 }
