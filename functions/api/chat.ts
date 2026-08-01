@@ -14,6 +14,7 @@ type FunctionContext = {
 type ChatRequest = {
   modelId?: string
   message?: string
+  conversationId?: string | null
 }
 
 type CreditResult = {
@@ -152,7 +153,7 @@ export async function onRequestPost(
     )
 
     /*
-     * Read and validate the customer's Supabase access token.
+     * Read and validate the customer's access token.
      */
     const authorizationHeader =
       context.request.headers.get('Authorization')
@@ -236,6 +237,8 @@ export async function onRequestPost(
 
     const modelId = requestBody.modelId?.trim()
     const message = requestBody.message?.trim()
+    const requestedConversationId =
+      requestBody.conversationId?.trim() || null
 
     if (!modelId) {
       return jsonResponse(
@@ -279,9 +282,7 @@ export async function onRequestPost(
       error: profileError,
     } = await supabaseAdmin
       .from('profiles')
-      .select(
-        'id, credits, subscription_status, expiry_date'
-      )
+      .select('id, credits, expiry_date')
       .eq('id', user.id)
       .maybeSingle()
 
@@ -421,7 +422,7 @@ export async function onRequestPost(
     }
 
     /*
-     * Verify that the model belongs to the customer's plan.
+     * Verify that the selected model belongs to the plan.
      */
     const {
       data: modelAccess,
@@ -519,8 +520,7 @@ export async function onRequestPost(
     }
 
     /*
-     * Convert the exact provider cost into customer credits.
-     * Every successful response costs at least one credit.
+     * Convert the provider cost into customer credits.
      */
     const providerCostUsd = Number(
       agentResponse.usage?.cost?.total_cost ?? 0
@@ -578,9 +578,42 @@ export async function onRequestPost(
       )
     }
 
+    /*
+     * Save the user message and AI reply.
+     *
+     * When conversationId is null, Supabase creates a new
+     * conversation. Later messages reuse the returned ID.
+     */
+    const {
+      data: savedConversationId,
+      error: historyError,
+    } = await supabaseAdmin.rpc('save_chat_exchange', {
+      p_user_id: user.id,
+      p_model_id: selectedModel.id,
+      p_user_message: message,
+      p_assistant_message: reply,
+      p_conversation_id: requestedConversationId,
+    })
+
+    if (historyError) {
+      throw new Error(
+        `The reply was generated, but chat history could not be saved: ${historyError.message}`
+      )
+    }
+
+    if (
+      typeof savedConversationId !== 'string' ||
+      !savedConversationId.trim()
+    ) {
+      throw new Error(
+        'Chat history did not return a valid conversation ID.'
+      )
+    }
+
     return jsonResponse(context.request, {
       success: true,
       responseId: agentResponse.id ?? null,
+      conversationId: savedConversationId,
       model: {
         id: selectedModel.id,
         name: selectedModel.name,

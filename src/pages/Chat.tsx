@@ -27,6 +27,8 @@ type ChatApiResponse = {
   reply?: string
   error?: string
   creditsRemaining?: number
+  creditsUsed?: number
+  providerCostUsd?: number
 }
 
 const CHAT_API_URL = import.meta.env.DEV
@@ -44,6 +46,12 @@ function Chat() {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const [creditsRemaining, setCreditsRemaining] =
+    useState<number | null>(null)
+
+  const [lastCreditsUsed, setLastCreditsUsed] =
+    useState<number | null>(null)
+
   useEffect(() => {
     async function loadModel() {
       try {
@@ -53,12 +61,44 @@ function Chat() {
 
         const {
           data: { user },
+          error: userError,
         } = await supabase.auth.getUser()
+
+        if (userError) {
+          throw userError
+        }
 
         if (!user) {
           throw new Error('You must log in first.')
         }
 
+        /*
+         * Load the customer's current credit balance.
+         */
+        const {
+          data: profileData,
+          error: profileError,
+        } = await supabase
+          .from('profiles')
+          .select('credits')
+          .eq('id', user.id)
+          .single()
+
+        if (profileError) {
+          throw profileError
+        }
+
+        if (typeof profileData.credits !== 'number') {
+          throw new Error(
+            'Your credit balance could not be loaded.'
+          )
+        }
+
+        setCreditsRemaining(profileData.credits)
+
+        /*
+         * Load the customer's active subscription.
+         */
         const {
           data: subscription,
           error: subscriptionError,
@@ -78,9 +118,14 @@ function Chat() {
         }
 
         if (subscription.status !== 'active') {
-          throw new Error('Your subscription is not active.')
+          throw new Error(
+            'Your subscription is not active.'
+          )
         }
 
+        /*
+         * Verify that the selected model belongs to the plan.
+         */
         const {
           data: modelAccess,
           error: modelError,
@@ -105,7 +150,9 @@ function Chat() {
         }
 
         const selectedModel =
-          modelAccess?.ai_models as unknown as AIModel | null
+          modelAccess?.ai_models as unknown as
+            | AIModel
+            | null
 
         if (!selectedModel) {
           throw new Error(
@@ -133,7 +180,7 @@ function Chat() {
       }
     }
 
-    loadModel()
+    void loadModel()
   }, [modelId])
 
   async function sendMessage(event?: FormEvent) {
@@ -183,7 +230,8 @@ function Chat() {
       const response = await fetch(CHAT_API_URL, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${session.access_token}`,
+          Authorization:
+            `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -192,8 +240,16 @@ function Chat() {
         }),
       })
 
-      const result =
-        (await response.json()) as ChatApiResponse
+      let result: ChatApiResponse
+
+      try {
+        result =
+          (await response.json()) as ChatApiResponse
+      } catch {
+        throw new Error(
+          'The server returned an invalid response.'
+        )
+      }
 
       if (!response.ok || !result.success) {
         throw new Error(
@@ -205,6 +261,21 @@ function Chat() {
         throw new Error(
           'The AI returned an empty response.'
         )
+      }
+
+      /*
+       * Update the balance returned by the protected API.
+       */
+      if (
+        typeof result.creditsRemaining === 'number'
+      ) {
+        setCreditsRemaining(
+          result.creditsRemaining
+        )
+      }
+
+      if (typeof result.creditsUsed === 'number') {
+        setLastCreditsUsed(result.creditsUsed)
       }
 
       const assistantMessage: ChatMessage = {
@@ -308,6 +379,13 @@ function Chat() {
             <p className="text-sm text-gray-400">
               {model.provider}
             </p>
+
+            {creditsRemaining !== null && (
+              <p className="text-sm text-green-400 mt-1">
+                {creditsRemaining.toLocaleString()}{' '}
+                credits remaining
+              </p>
+            )}
           </div>
         </div>
       </header>
@@ -368,6 +446,14 @@ function Chat() {
           <div className="mt-4 border border-red-500/30 bg-red-500/10 text-red-300 rounded-xl px-4 py-3">
             {error}
           </div>
+        )}
+
+        {lastCreditsUsed !== null && (
+          <p className="mt-4 text-sm text-gray-400">
+            Last response used {lastCreditsUsed}{' '}
+            credit
+            {lastCreditsUsed === 1 ? '' : 's'}.
+          </p>
         )}
 
         <form
