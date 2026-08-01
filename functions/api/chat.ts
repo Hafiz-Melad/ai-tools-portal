@@ -22,6 +22,20 @@ type CreditResult = {
   credits_remaining: number
 }
 
+type ConversationMemory = {
+  id: string
+  provider_response_id: string | null
+}
+
+type AgentRequestBody = {
+  model: string
+  input: string
+  max_output_tokens: number
+  stream: boolean
+  store: boolean
+  previous_response_id?: string
+}
+
 type AgentResponse = {
   id?: string
   model?: string
@@ -59,7 +73,7 @@ const allowedOrigins = [
 
 /*
  * 10,000 customer credits represent $1 of API usage.
- * One credit therefore represents $0.0001.
+ * One credit represents $0.0001.
  */
 const CREDITS_PER_USD = 10_000
 
@@ -76,6 +90,12 @@ function requireEnv(
   }
 
   return cleanedValue
+}
+
+function isValidUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  )
 }
 
 function getCorsHeaders(request: Request): HeadersInit {
@@ -237,6 +257,7 @@ export async function onRequestPost(
 
     const modelId = requestBody.modelId?.trim()
     const message = requestBody.message?.trim()
+
     const requestedConversationId =
       requestBody.conversationId?.trim() || null
 
@@ -246,6 +267,31 @@ export async function onRequestPost(
         {
           success: false,
           error: 'No AI model was selected.',
+        },
+        400
+      )
+    }
+
+    if (!isValidUuid(modelId)) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error: 'The selected model ID is invalid.',
+        },
+        400
+      )
+    }
+
+    if (
+      requestedConversationId &&
+      !isValidUuid(requestedConversationId)
+    ) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error: 'The conversation ID is invalid.',
         },
         400
       )
@@ -453,6 +499,74 @@ export async function onRequestPost(
     }
 
     /*
+     * Load the previous Perplexity response ID when this is
+     * an existing conversation.
+     *
+     * The ownership and model checks prevent a customer from
+     * continuing another customer's conversation.
+     */
+    let previousResponseId: string | null = null
+
+    if (requestedConversationId) {
+      const {
+        data: conversationData,
+        error: conversationError,
+      } = await supabaseAdmin
+        .from('conversations')
+        .select('id, provider_response_id')
+        .eq('id', requestedConversationId)
+        .eq('user_id', user.id)
+        .eq('model_id', selectedModel.id)
+        .maybeSingle()
+
+      if (conversationError) {
+        throw new Error(
+          `Could not load conversation memory: ${conversationError.message}`
+        )
+      }
+
+      const conversation =
+        conversationData as ConversationMemory | null
+
+      if (!conversation) {
+        return jsonResponse(
+          context.request,
+          {
+            success: false,
+            error:
+              'The conversation was not found or access was denied.',
+          },
+          404
+        )
+      }
+
+      if (
+        typeof conversation.provider_response_id ===
+          'string' &&
+        conversation.provider_response_id.trim()
+      ) {
+        previousResponseId =
+          conversation.provider_response_id.trim()
+      }
+    }
+
+    /*
+     * Prepare the Perplexity Agent API request.
+     */
+    const agentRequestBody: AgentRequestBody = {
+      model: selectedModel.model_key,
+      input: message,
+      max_output_tokens: 600,
+      stream: false,
+      store: false,
+    }
+
+    if (previousResponseId) {
+      agentRequestBody.previous_response_id =
+        previousResponseId
+    }
+
+    /*
      * Send the message to the Perplexity Agent API.
      */
     const perplexityResponse = await fetch(
@@ -464,13 +578,7 @@ export async function onRequestPost(
           'Content-Type': 'application/json',
           Accept: 'application/json',
         },
-        body: JSON.stringify({
-          model: selectedModel.model_key,
-          input: message,
-          max_output_tokens: 600,
-          stream: false,
-          store: false,
-        }),
+        body: JSON.stringify(agentRequestBody),
       }
     )
 
@@ -500,6 +608,21 @@ export async function onRequestPost(
           success: false,
           error: providerMessage,
           providerStatus: perplexityResponse.status,
+        },
+        502
+      )
+    }
+
+    const providerResponseId =
+      agentResponse.id?.trim()
+
+    if (!providerResponseId) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            'The AI provider did not return a response ID.',
         },
         502
       )
@@ -579,21 +702,28 @@ export async function onRequestPost(
     }
 
     /*
-     * Save the user message and AI reply.
+     * Save the exchange and the latest Perplexity response ID.
      *
-     * When conversationId is null, Supabase creates a new
-     * conversation. Later messages reuse the returned ID.
+     * New conversations receive their first provider response
+     * ID. Existing conversations replace their stored response
+     * ID with the newest one.
      */
     const {
       data: savedConversationId,
       error: historyError,
-    } = await supabaseAdmin.rpc('save_chat_exchange', {
-      p_user_id: user.id,
-      p_model_id: selectedModel.id,
-      p_user_message: message,
-      p_assistant_message: reply,
-      p_conversation_id: requestedConversationId,
-    })
+    } = await supabaseAdmin.rpc(
+      'save_chat_exchange_v2',
+      {
+        p_user_id: user.id,
+        p_model_id: selectedModel.id,
+        p_user_message: message,
+        p_assistant_message: reply,
+        p_conversation_id:
+          requestedConversationId,
+        p_provider_response_id:
+          providerResponseId,
+      }
+    )
 
     if (historyError) {
       throw new Error(
@@ -612,8 +742,9 @@ export async function onRequestPost(
 
     return jsonResponse(context.request, {
       success: true,
-      responseId: agentResponse.id ?? null,
+      responseId: providerResponseId,
       conversationId: savedConversationId,
+      memoryContinued: previousResponseId !== null,
       model: {
         id: selectedModel.id,
         name: selectedModel.name,

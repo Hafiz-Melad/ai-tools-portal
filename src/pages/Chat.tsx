@@ -26,6 +26,7 @@ type ChatApiResponse = {
   success: boolean
   reply?: string
   error?: string
+  conversationId?: string
   creditsRemaining?: number
   creditsUsed?: number
   providerCostUsd?: number
@@ -46,6 +47,9 @@ function Chat() {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const [conversationId, setConversationId] =
+    useState<string | null>(null)
+
   const [creditsRemaining, setCreditsRemaining] =
     useState<number | null>(null)
 
@@ -54,6 +58,15 @@ function Chat() {
 
   useEffect(() => {
     async function loadModel() {
+      setLoading(true)
+      setError(null)
+      setModel(null)
+      setMessages([])
+      setMessage('')
+      setConversationId(null)
+      setCreditsRemaining(null)
+      setLastCreditsUsed(null)
+
       try {
         if (!modelId) {
           throw new Error('No AI model was selected.')
@@ -237,6 +250,7 @@ function Chat() {
         body: JSON.stringify({
           modelId: model.id,
           message: cleanedMessage,
+          conversationId,
         }),
       })
 
@@ -263,9 +277,21 @@ function Chat() {
         )
       }
 
+      if (
+        typeof result.conversationId !== 'string' ||
+        !result.conversationId.trim()
+      ) {
+        throw new Error(
+          'The server did not return a valid conversation ID.'
+        )
+      }
+
       /*
-       * Update the balance returned by the protected API.
+       * The first response creates the conversation.
+       * Later requests reuse the same conversation ID.
        */
+      setConversationId(result.conversationId)
+
       if (
         typeof result.creditsRemaining === 'number'
       ) {
