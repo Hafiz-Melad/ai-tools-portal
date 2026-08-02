@@ -1,21 +1,25 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
-} from 'react'
-
-import type {
-  FormEvent,
-  KeyboardEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
 } from 'react'
 
 import {
+  useLocation,
   useNavigate,
   useParams,
-  useSearchParams,
 } from 'react-router-dom'
 
 import { supabase } from '../lib/supabase'
+
+type Profile = {
+  full_name: string
+  credits: number
+}
 
 type AIModel = {
   id: string
@@ -60,7 +64,17 @@ type HistoryApiResponse = {
   success: boolean
   error?: string
   conversation?: HistoryConversation
+  conversations?: HistoryConversation[]
   messages?: HistoryMessage[]
+}
+
+type SidebarItemProps = {
+  label: string
+  icon: ReactNode
+  onClick?: () => void
+  active?: boolean
+  disabled?: boolean
+  badge?: string
 }
 
 const CHAT_API_URL = import.meta.env.DEV
@@ -71,33 +85,335 @@ const HISTORY_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/history'
   : '/api/history'
 
+function Icon({
+  name,
+  className = 'h-5 w-5',
+}: {
+  name:
+    | 'plus'
+    | 'chat'
+    | 'folder'
+    | 'artifact'
+    | 'code'
+    | 'sliders'
+    | 'palette'
+    | 'spark'
+    | 'send'
+    | 'copy'
+    | 'check'
+    | 'logout'
+    | 'menu'
+    | 'close'
+    | 'mic'
+    | 'wave'
+  className?: string
+}) {
+  const common = {
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.7,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+  }
+
+  const paths: Record<typeof name, ReactNode> = {
+    plus: (
+      <>
+        <path d="M12 5v14" {...common} />
+        <path d="M5 12h14" {...common} />
+      </>
+    ),
+    chat: (
+      <path
+        d="M5.4 17.7 3.7 20v-4.7A8.1 8.1 0 1 1 20.2 12a8.1 8.1 0 0 1-8.2 8.1c-2.4 0-4.6-.8-6.6-2.4Z"
+        {...common}
+      />
+    ),
+    folder: (
+      <>
+        <path
+          d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2V7.5Z"
+          {...common}
+        />
+        <path
+          d="M5 7.5V5.8a2 2 0 0 1 2-2h3.4l1.6 2H19"
+          {...common}
+        />
+      </>
+    ),
+    artifact: (
+      <>
+        <path
+          d="M4.2 7.2 12 3l7.8 4.2v9.6L12 21l-7.8-4.2V7.2Z"
+          {...common}
+        />
+        <path d="m4.6 7.4 7.4 4 7.4-4" {...common} />
+        <path d="M12 11.4V21" {...common} />
+      </>
+    ),
+    code: (
+      <>
+        <path d="m8.2 7.2-4 4.8 4 4.8" {...common} />
+        <path d="m15.8 7.2 4 4.8-4 4.8" {...common} />
+        <path d="m13.7 4.8-3.4 14.4" {...common} />
+      </>
+    ),
+    sliders: (
+      <>
+        <path d="M4 7h10" {...common} />
+        <path d="M18 7h2" {...common} />
+        <path d="M4 17h2" {...common} />
+        <path d="M10 17h10" {...common} />
+        <circle cx="16" cy="7" r="2" {...common} />
+        <circle cx="8" cy="17" r="2" {...common} />
+      </>
+    ),
+    palette: (
+      <>
+        <path
+          d="M12 3.2a8.8 8.8 0 1 0 0 17.6h1.1a1.9 1.9 0 0 0 1.5-3.1 1.9 1.9 0 0 1 1.5-3.1h1.4A3.5 3.5 0 0 0 21 11.1 8.1 8.1 0 0 0 12 3.2Z"
+          {...common}
+        />
+        <circle cx="7.5" cy="10" r=".8" fill="currentColor" />
+        <circle cx="10" cy="6.8" r=".8" fill="currentColor" />
+        <circle cx="14.2" cy="6.8" r=".8" fill="currentColor" />
+      </>
+    ),
+    spark: (
+      <>
+        <path
+          d="M12 2.8c.5 4.8 2.4 6.9 7.2 7.4-4.8.5-6.7 2.6-7.2 7.4-.5-4.8-2.4-6.9-7.2-7.4 4.8-.5 6.7-2.6 7.2-7.4Z"
+          fill="currentColor"
+          stroke="none"
+        />
+        <path
+          d="M19.1 15.7c.2 1.8.9 2.6 2.7 2.8-1.8.2-2.5 1-2.7 2.8-.2-1.8-.9-2.6-2.7-2.8 1.8-.2 2.5-1 2.7-2.8Z"
+          fill="currentColor"
+          stroke="none"
+        />
+      </>
+    ),
+    send: (
+      <>
+        <path d="m5 12 14-7-4.2 14-3-5-6.8-2Z" {...common} />
+        <path d="m11.8 14 3.5-3.5" {...common} />
+      </>
+    ),
+    copy: (
+      <>
+        <rect
+          x="8"
+          y="8"
+          width="11"
+          height="11"
+          rx="2"
+          {...common}
+        />
+        <path
+          d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"
+          {...common}
+        />
+      </>
+    ),
+    check: (
+      <path d="m5 12.5 4.2 4.2L19 7" {...common} />
+    ),
+    logout: (
+      <>
+        <path d="M10 5H5.5v14H10" {...common} />
+        <path d="M13 8.5 16.5 12 13 15.5" {...common} />
+        <path d="M8 12h8.5" {...common} />
+      </>
+    ),
+    menu: (
+      <>
+        <path d="M4 7h16" {...common} />
+        <path d="M4 12h16" {...common} />
+        <path d="M4 17h16" {...common} />
+      </>
+    ),
+    close: (
+      <>
+        <path d="m6 6 12 12" {...common} />
+        <path d="m18 6-12 12" {...common} />
+      </>
+    ),
+    mic: (
+      <>
+        <rect
+          x="9"
+          y="3.5"
+          width="6"
+          height="11"
+          rx="3"
+          {...common}
+        />
+        <path d="M6.8 11.5a5.2 5.2 0 0 0 10.4 0" {...common} />
+        <path d="M12 16.7v3.8" {...common} />
+      </>
+    ),
+    wave: (
+      <>
+        <path d="M4 10v4" {...common} />
+        <path d="M7.2 7.5v9" {...common} />
+        <path d="M10.4 5v14" {...common} />
+        <path d="M13.6 8.5v7" {...common} />
+        <path d="M16.8 6.5v11" {...common} />
+        <path d="M20 10v4" {...common} />
+      </>
+    ),
+  }
+
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      {paths[name]}
+    </svg>
+  )
+}
+
+function SidebarItem({
+  label,
+  icon,
+  onClick,
+  active = false,
+  disabled = false,
+  badge,
+}: SidebarItemProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        'group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition',
+        active
+          ? 'bg-[#2a2a28] text-[#f2eee6]'
+          : 'text-[#ded8cf] hover:bg-[#292927]',
+        disabled
+          ? 'cursor-not-allowed opacity-55'
+          : 'cursor-pointer',
+      ].join(' ')}
+    >
+      <span className="flex h-5 w-5 items-center justify-center text-[#d9d3ca]">
+        {icon}
+      </span>
+
+      <span className="min-w-0 flex-1 truncate">
+        {label}
+      </span>
+
+      {badge && (
+        <span className="rounded-full border border-[#4b4945] px-2 py-0.5 text-[10px] text-[#aaa39a]">
+          {badge}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function normalizeModelRelation(
+  value: unknown
+): AIModel | null {
+  if (Array.isArray(value)) {
+    return (value[0] as AIModel | undefined) ?? null
+  }
+
+  return (value as AIModel | null) ?? null
+}
+
+function getInitials(fullName: string): string {
+  const parts = fullName
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+
+  if (parts.length === 0) {
+    return 'U'
+  }
+
+  return parts
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('')
+}
+
+function formatConversationDate(value: string): string {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+  }).format(date)
+}
+
 function Chat() {
-  const { modelId } = useParams()
+  const { modelId: modelIdFromUrl } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
 
-  const [searchParams, setSearchParams] =
-    useSearchParams()
-
-  const conversationFromUrl =
-    searchParams.get('conversation')?.trim() || null
+  const conversationFromUrl = useMemo<string>(
+    () =>
+      new URLSearchParams(location.search)
+        .get('conversation')
+        ?.trim() ?? '',
+    [location.search]
+  )
 
   const messagesEndRef =
     useRef<HTMLDivElement | null>(null)
 
-  const [model, setModel] =
-    useState<AIModel | null>(null)
+  const loadedConversationIdRef =
+    useRef<string | null>(null)
+
+  const pendingPromptRef =
+    useRef<string | null>(null)
+
+  const [profile, setProfile] =
+    useState<Profile | null>(null)
+
+  const [models, setModels] =
+    useState<AIModel[]>([])
+
+  const [activeModelId, setActiveModelId] =
+    useState(modelIdFromUrl ?? '')
 
   const [messages, setMessages] =
     useState<ChatMessage[]>([])
 
+  const [conversations, setConversations] =
+    useState<HistoryConversation[]>([])
+
   const [message, setMessage] = useState('')
-  const [loading, setLoading] = useState(true)
+
+  const [bootstrapLoading, setBootstrapLoading] =
+    useState(true)
+
+  const [
+    conversationLoading,
+    setConversationLoading,
+  ] = useState(false)
+
   const [sending, setSending] = useState(false)
+
+  const [sidebarOpen, setSidebarOpen] =
+    useState(false)
 
   const [error, setError] =
     useState<string | null>(null)
 
   const [conversationId, setConversationId] =
+    useState<string | null>(null)
+
+  const [conversationTitle, setConversationTitle] =
     useState<string | null>(null)
 
   const [creditsRemaining, setCreditsRemaining] =
@@ -109,6 +425,21 @@ function Chat() {
   const [lastCreditsUsed, setLastCreditsUsed] =
     useState<number | null>(null)
 
+  const [copiedMessageId, setCopiedMessageId] =
+    useState<string | null>(null)
+
+  const [signingOut, setSigningOut] =
+    useState(false)
+
+  const activeModel = useMemo(
+    () =>
+      models.find(
+        (candidate) =>
+          candidate.id === activeModelId
+      ) ?? null,
+    [models, activeModelId]
+  )
+
   const hasCredits =
     typeof creditsRemaining === 'number' &&
     creditsRemaining > 0
@@ -117,104 +448,78 @@ function Chat() {
     subscriptionStatus === 'active'
 
   const canSendMessages =
-    hasCredits && subscriptionIsActive
+    hasCredits &&
+    subscriptionIsActive &&
+    activeModel !== null
 
   const accessMessage = !hasCredits
-    ? 'You have no remaining credits. Add credits to continue chatting.'
+    ? 'No credits remain on this account. Contact the administrator to add credits.'
     : !subscriptionIsActive
-      ? 'Your subscription is inactive. Add credits to reactivate chat access.'
+      ? 'This Claude subscription is inactive.'
       : null
 
   useEffect(() => {
-    async function loadChatPage() {
-      setLoading(true)
-      setError(null)
-      setModel(null)
-      setMessages([])
-      setConversationId(null)
-      setCreditsRemaining(null)
-      setSubscriptionStatus(null)
-      setLastCreditsUsed(null)
+    let cancelled = false
 
+    async function bootstrapChat() {
       try {
-        if (!modelId) {
-          throw new Error(
-            'No AI model was selected.'
-          )
-        }
+        setBootstrapLoading(true)
+        setError(null)
 
         const {
-          data: { user },
-          error: userError,
-        } = await supabase.auth.getUser()
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession()
 
-        if (userError) {
-          throw userError
+        if (sessionError) {
+          throw sessionError
         }
 
-        if (!user) {
+        if (!session?.user) {
           throw new Error(
             'You must log in first.'
           )
         }
 
-        /*
-         * Load the current credit balance.
-         */
-        const {
-          data: profileData,
-          error: profileError,
-        } = await supabase
-          .from('profiles')
-          .select('credits')
-          .eq('id', user.id)
-          .single()
+        const user = session.user
 
-        if (profileError) {
-          throw profileError
+        const [
+          profileResult,
+          subscriptionResult,
+        ] = await Promise.all([
+          supabase
+            .from('profiles')
+            .select('full_name, credits')
+            .eq('id', user.id)
+            .single(),
+
+          supabase
+            .from('subscriptions')
+            .select('plan_id, status')
+            .eq('user_id', user.id)
+            .limit(1)
+            .maybeSingle(),
+        ])
+
+        if (profileResult.error) {
+          throw profileResult.error
         }
 
-        if (
-          typeof profileData.credits !== 'number'
-        ) {
-          throw new Error(
-            'Your credit balance could not be loaded.'
-          )
+        if (subscriptionResult.error) {
+          throw subscriptionResult.error
         }
 
-        setCreditsRemaining(profileData.credits)
-
-        /*
-         * Load the subscription. Inactive subscriptions may still
-         * read saved history, but they cannot send new messages.
-         */
-        const {
-          data: subscription,
-          error: subscriptionError,
-        } = await supabase
-          .from('subscriptions')
-          .select('plan_id, status')
-          .eq('user_id', user.id)
-          .limit(1)
-          .maybeSingle()
-
-        if (subscriptionError) {
-          throw subscriptionError
-        }
-
-        if (!subscription) {
+        if (!subscriptionResult.data) {
           throw new Error(
             'No subscription was found.'
           )
         }
 
-        setSubscriptionStatus(subscription.status)
+        const subscription =
+          subscriptionResult.data
 
-        /*
-         * Verify that the model belongs to the plan.
-         */
         const {
-          data: modelAccess,
+          data: modelRows,
           error: modelError,
         } = await supabase
           .from('plan_models')
@@ -229,139 +534,323 @@ function Chat() {
             )
           `)
           .eq('plan_id', subscription.plan_id)
-          .eq('model_id', modelId)
-          .maybeSingle()
 
         if (modelError) {
           throw modelError
         }
 
-        const selectedModel =
-          modelAccess?.ai_models as unknown as
-            | AIModel
-            | null
-
-        if (!selectedModel) {
-          throw new Error(
-            'This model is not included in your plan.'
+        const availableModels = (modelRows ?? [])
+          .map((item: { ai_models?: unknown }) =>
+            normalizeModelRelation(item.ai_models)
           )
-        }
-
-        if (!selectedModel.enabled) {
-          throw new Error(
-            'This model is currently unavailable.'
-          )
-        }
-
-        setModel(selectedModel)
-
-        /*
-         * When the URL contains a conversation ID,
-         * load its saved messages.
-         */
-        if (conversationFromUrl) {
-          const {
-            data: { session },
-            error: sessionError,
-          } = await supabase.auth.getSession()
-
-          if (sessionError) {
-            throw sessionError
-          }
-
-          if (!session?.access_token) {
-            throw new Error(
-              'Your login session has expired.'
-            )
-          }
-
-          const historyResponse = await fetch(
-            `${HISTORY_API_URL}?conversationId=${encodeURIComponent(
-              conversationFromUrl
-            )}`,
-            {
-              method: 'GET',
-              headers: {
-                Authorization:
-                  `Bearer ${session.access_token}`,
-              },
-            }
-          )
-
-          let historyResult: HistoryApiResponse
-
-          try {
-            historyResult =
-              (await historyResponse.json()) as
-                HistoryApiResponse
-          } catch {
-            throw new Error(
-              'The history server returned an invalid response.'
-            )
-          }
-
-          if (
-            !historyResponse.ok ||
-            !historyResult.success
-          ) {
-            throw new Error(
-              historyResult.error ||
-                'Could not load the conversation.'
-            )
-          }
-
-          if (!historyResult.conversation) {
-            throw new Error(
-              'The conversation was not found.'
-            )
-          }
-
-          if (
-            historyResult.conversation.model_id !==
-            selectedModel.id
-          ) {
-            throw new Error(
-              'This conversation belongs to another AI model.'
-            )
-          }
-
-          const restoredMessages: ChatMessage[] =
-            (historyResult.messages ?? [])
-              .filter(
-                (savedMessage) =>
-                  savedMessage.role === 'user' ||
-                  savedMessage.role === 'assistant'
+          .filter(
+            (candidate): candidate is AIModel =>
+              candidate !== null &&
+              candidate.enabled === true &&
+              (
+                candidate.provider.toLowerCase() ===
+                  'anthropic' ||
+                candidate.name
+                  .toLowerCase()
+                  .startsWith('claude')
               )
-              .map((savedMessage) => ({
-                id: savedMessage.id,
-                role:
-                  savedMessage.role as
-                    | 'user'
-                    | 'assistant',
-                content: savedMessage.content,
-              }))
-
-          setMessages(restoredMessages)
-
-          setConversationId(
-            historyResult.conversation.id
           )
+          .sort((firstModel, secondModel) =>
+            secondModel.name.localeCompare(
+              firstModel.name,
+              undefined,
+              { numeric: true }
+            )
+          )
+
+        const requestedModel =
+          availableModels.find(
+            (candidate) =>
+              candidate.id === modelIdFromUrl
+          )
+
+        const defaultModel =
+          requestedModel ??
+          availableModels.find(
+            (candidate) =>
+              candidate.name.toLowerCase() ===
+              'claude sonnet 5'
+          ) ??
+          availableModels.find((candidate) =>
+            candidate.name
+              .toLowerCase()
+              .includes('sonnet')
+          ) ??
+          availableModels[0]
+
+        const historyResponse = await fetch(
+          HISTORY_API_URL,
+          {
+            method: 'GET',
+            headers: {
+              Authorization:
+                `Bearer ${session.access_token}`,
+            },
+          }
+        )
+
+        let historyResult: HistoryApiResponse
+
+        try {
+          historyResult =
+            (await historyResponse.json()) as
+              HistoryApiResponse
+        } catch {
+          throw new Error(
+            'The history server returned an invalid response.'
+          )
+        }
+
+        if (
+          !historyResponse.ok ||
+          !historyResult.success
+        ) {
+          throw new Error(
+            historyResult.error ||
+              'Could not load recent conversations.'
+          )
+        }
+
+        const availableModelIds = new Set(
+          availableModels.map(
+            (candidate) => candidate.id
+          )
+        )
+
+        if (cancelled) {
+          return
+        }
+
+        setProfile(profileResult.data)
+        setCreditsRemaining(
+          profileResult.data.credits
+        )
+        setSubscriptionStatus(
+          subscription.status
+        )
+        setModels(availableModels)
+        setActiveModelId(defaultModel?.id ?? '')
+
+        setConversations(
+          (historyResult.conversations ?? [])
+            .filter((conversation) =>
+              availableModelIds.has(
+                conversation.model_id
+              )
+            )
+            .slice(0, 30)
+        )
+
+        if (!conversationFromUrl) {
+          const pendingPrompt =
+            sessionStorage
+              .getItem('claude_pending_prompt')
+              ?.trim()
+
+          if (pendingPrompt) {
+            sessionStorage.removeItem(
+              'claude_pending_prompt'
+            )
+
+            pendingPromptRef.current =
+              pendingPrompt
+          }
         }
       } catch (err) {
+        if (cancelled) {
+          return
+        }
+
         console.error(err)
 
         setError(
           err instanceof Error
             ? err.message
-            : 'Could not load the chat.'
+            : 'Could not load Claude.'
         )
       } finally {
-        setLoading(false)
+        if (!cancelled) {
+          setBootstrapLoading(false)
+        }
       }
     }
 
-    void loadChatPage()
-  }, [modelId, conversationFromUrl])
+    void bootstrapChat()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (bootstrapLoading) {
+      return
+    }
+
+    const targetConversationId: string =
+      conversationFromUrl
+
+    if (!targetConversationId) {
+      if (loadedConversationIdRef.current) {
+        loadedConversationIdRef.current = null
+        setConversationId(null)
+        setConversationTitle(null)
+        setMessages([])
+        setLastCreditsUsed(null)
+      }
+
+      return
+    }
+
+    if (
+      loadedConversationIdRef.current ===
+      targetConversationId
+    ) {
+      return
+    }
+
+    let cancelled = false
+
+    async function loadConversation() {
+      try {
+        setConversationLoading(true)
+        setError(null)
+
+        const {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession()
+
+        if (sessionError) {
+          throw sessionError
+        }
+
+        if (!session?.access_token) {
+          throw new Error(
+            'Your login session has expired.'
+          )
+        }
+
+        const response = await fetch(
+          `${HISTORY_API_URL}?conversationId=${encodeURIComponent(
+            targetConversationId
+          )}`,
+          {
+            method: 'GET',
+            headers: {
+              Authorization:
+                `Bearer ${session.access_token}`,
+            },
+          }
+        )
+
+        let result: HistoryApiResponse
+
+        try {
+          result =
+            (await response.json()) as
+              HistoryApiResponse
+        } catch {
+          throw new Error(
+            'The history server returned an invalid response.'
+          )
+        }
+
+        if (!response.ok || !result.success) {
+          throw new Error(
+            result.error ||
+              'Could not load the conversation.'
+          )
+        }
+
+        if (!result.conversation) {
+          throw new Error(
+            'The conversation was not found.'
+          )
+        }
+
+        const restoredMessages =
+          (result.messages ?? [])
+            .filter(
+              (savedMessage) =>
+                savedMessage.role === 'user' ||
+                savedMessage.role === 'assistant'
+            )
+            .map((savedMessage) => ({
+              id: savedMessage.id,
+              role:
+                savedMessage.role as
+                  | 'user'
+                  | 'assistant',
+              content: savedMessage.content,
+            }))
+
+        const storedModel = models.find(
+          (candidate) =>
+            candidate.id ===
+            result.conversation?.model_id
+        )
+
+        if (cancelled) {
+          return
+        }
+
+        loadedConversationIdRef.current =
+          result.conversation.id
+
+        setConversationId(
+          result.conversation.id
+        )
+
+        setConversationTitle(
+          result.conversation.title
+        )
+
+        setMessages(restoredMessages)
+
+        if (storedModel) {
+          setActiveModelId(storedModel.id)
+
+          navigate(
+            `/chat/${storedModel.id}?conversation=${result.conversation.id}`,
+            { replace: true }
+          )
+        }
+      } catch (err) {
+        if (cancelled) {
+          return
+        }
+
+        console.error(err)
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Could not load the conversation.'
+        )
+      } finally {
+        if (!cancelled) {
+          setConversationLoading(false)
+        }
+      }
+    }
+
+    void loadConversation()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    bootstrapLoading,
+    conversationFromUrl,
+    models,
+    navigate,
+  ])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -369,14 +858,85 @@ function Chat() {
     })
   }, [messages, sending])
 
-  async function sendMessage(event?: FormEvent) {
-    event?.preventDefault()
-
-    const cleanedMessage = message.trim()
+  useEffect(() => {
+    const pendingPrompt =
+      pendingPromptRef.current
 
     if (
+      bootstrapLoading ||
+      conversationLoading ||
+      sending ||
+      conversationFromUrl ||
+      !activeModel ||
+      !canSendMessages ||
+      !pendingPrompt
+    ) {
+      return
+    }
+
+    pendingPromptRef.current = null
+    void sendText(pendingPrompt)
+  }, [
+    bootstrapLoading,
+    conversationLoading,
+    sending,
+    conversationFromUrl,
+    activeModel,
+    canSendMessages,
+  ])
+
+  async function refreshConversationList(
+    accessToken: string
+  ) {
+    try {
+      const response = await fetch(
+        HISTORY_API_URL,
+        {
+          method: 'GET',
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+          },
+        }
+      )
+
+      const result =
+        (await response.json()) as
+          HistoryApiResponse
+
+      if (
+        response.ok &&
+        result.success &&
+        result.conversations
+      ) {
+        const availableModelIds = new Set(
+          models.map((candidate) => candidate.id)
+        )
+
+        setConversations(
+          result.conversations
+            .filter((conversation) =>
+              availableModelIds.has(
+                conversation.model_id
+              )
+            )
+            .slice(0, 30)
+        )
+      }
+    } catch (refreshError) {
+      console.error(
+        'Could not refresh conversation list:',
+        refreshError
+      )
+    }
+  }
+
+  async function sendText(
+    cleanedMessage: string
+  ) {
+    if (
       !cleanedMessage ||
-      !model ||
+      !activeModel ||
       sending
     ) {
       return
@@ -429,7 +989,7 @@ function Chat() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          modelId: model.id,
+          modelId: activeModel.id,
           message: cleanedMessage,
           conversationId,
         }),
@@ -448,13 +1008,13 @@ function Chat() {
 
       if (!response.ok || !result.success) {
         throw new Error(
-          result.error || 'The AI request failed.'
+          result.error || 'The Claude request failed.'
         )
       }
 
       if (!result.reply) {
         throw new Error(
-          'The AI returned an empty response.'
+          'Claude returned an empty response.'
         )
       }
 
@@ -470,7 +1030,16 @@ function Chat() {
       const returnedConversationId =
         result.conversationId.trim()
 
+      loadedConversationIdRef.current =
+        returnedConversationId
+
       setConversationId(returnedConversationId)
+
+      if (!conversationTitle) {
+        setConversationTitle(
+          cleanedMessage.slice(0, 100)
+        )
+      }
 
       if (
         typeof result.creditsRemaining === 'number'
@@ -503,24 +1072,14 @@ function Chat() {
         assistantMessage,
       ])
 
-      /*
-       * Put the conversation ID in the URL.
-       * This allows refresh and browser history to work.
-       */
-      if (
-        conversationFromUrl !==
-        returnedConversationId
-      ) {
-        setSearchParams(
-          {
-            conversation:
-              returnedConversationId,
-          },
-          {
-            replace: true,
-          }
-        )
-      }
+      navigate(
+        `/chat/${activeModel.id}?conversation=${returnedConversationId}`,
+        { replace: true }
+      )
+
+      await refreshConversationList(
+        session.access_token
+      )
     } catch (err) {
       console.error(err)
 
@@ -544,6 +1103,11 @@ function Chat() {
     }
   }
 
+  function sendMessage(event?: FormEvent) {
+    event?.preventDefault()
+    void sendText(message.trim())
+  }
+
   function handleKeyDown(
     event: KeyboardEvent<HTMLTextAreaElement>
   ) {
@@ -552,240 +1116,663 @@ function Chat() {
       !event.shiftKey
     ) {
       event.preventDefault()
-      void sendMessage()
+      sendMessage()
     }
   }
 
-  function startNewChat() {
+  function startNewChat(
+    selectedModelId = activeModel?.id
+  ) {
+    if (!selectedModelId) {
+      return
+    }
+
+    pendingPromptRef.current = null
+    loadedConversationIdRef.current = null
+
+    sessionStorage.removeItem(
+      'claude_pending_prompt'
+    )
+
     setMessages([])
     setMessage('')
     setConversationId(null)
+    setConversationTitle(null)
     setError(null)
     setLastCreditsUsed(null)
+    setSidebarOpen(false)
+    setActiveModelId(selectedModelId)
 
-    setSearchParams({}, { replace: true })
+    navigate(`/chat/${selectedModelId}`)
   }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        Loading chat...
-      </div>
+  function changeModel(nextModelId: string) {
+    const nextModel = models.find(
+      (candidate) =>
+        candidate.id === nextModelId
+    )
+
+    if (!nextModel || nextModel.id === activeModelId) {
+      return
+    }
+
+    setActiveModelId(nextModel.id)
+
+    const conversationQuery = conversationId
+      ? `?conversation=${conversationId}`
+      : ''
+
+    navigate(
+      `/chat/${nextModel.id}${conversationQuery}`,
+      { replace: true }
     )
   }
 
-  if (error && !model) {
-    return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center px-6">
-        <div className="max-w-md w-full border border-red-500/30 bg-red-500/10 rounded-2xl p-6">
-          <h1 className="text-xl font-bold text-red-300">
-            Chat unavailable
-          </h1>
+  function openConversation(
+    conversation: HistoryConversation
+  ) {
+    loadedConversationIdRef.current = null
+    setSidebarOpen(false)
 
-          <p className="text-red-200/80 mt-3">
-            {error}
+    navigate(
+      `/chat/${conversation.model_id}?conversation=${conversation.id}`
+    )
+  }
+
+  async function copyMessage(
+    chatMessage: ChatMessage
+  ) {
+    try {
+      await navigator.clipboard.writeText(
+        chatMessage.content
+      )
+
+      setCopiedMessageId(chatMessage.id)
+
+      window.setTimeout(() => {
+        setCopiedMessageId((currentId) =>
+          currentId === chatMessage.id
+            ? null
+            : currentId
+        )
+      }, 1500)
+    } catch {
+      setError(
+        'Could not copy the response.'
+      )
+    }
+  }
+
+  async function handleSignOut() {
+    try {
+      setSigningOut(true)
+      await supabase.auth.signOut()
+      navigate('/login', { replace: true })
+    } finally {
+      setSigningOut(false)
+    }
+  }
+
+  const selectedModelName =
+    activeModel?.name.replace(
+      /^Claude\s+/i,
+      ''
+    ) || 'Claude'
+
+  const pageTitle =
+    conversationTitle?.trim() ||
+    (messages.length > 0
+      ? 'Claude conversation'
+      : 'New chat')
+
+  const sidebar = (
+    <div className="flex h-full flex-col bg-[#20201e] px-3 py-3">
+      <div className="flex items-center justify-between px-1 py-1">
+        <button
+          type="button"
+          onClick={() => navigate('/portal')}
+          className="text-[24px] leading-none text-[#f1eee8]"
+          style={{
+            fontFamily:
+              'Georgia, Cambria, Times New Roman, serif',
+          }}
+        >
+          Claude
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSidebarOpen(false)}
+          className="rounded-lg p-2 text-[#d5cfc6] hover:bg-[#2b2b29] lg:hidden"
+          aria-label="Close sidebar"
+        >
+          <Icon name="close" />
+        </button>
+      </div>
+
+      <nav className="mt-4 space-y-1">
+        <SidebarItem
+          label="New chat"
+          icon={<Icon name="plus" />}
+          onClick={() => startNewChat()}
+        />
+
+        <SidebarItem
+          label="Chats"
+          icon={<Icon name="chat" />}
+          active
+        />
+
+        <SidebarItem
+          label="Projects"
+          icon={<Icon name="folder" />}
+          disabled
+          badge="Next"
+        />
+
+        <SidebarItem
+          label="Artifacts"
+          icon={<Icon name="artifact" />}
+          disabled
+          badge="Next"
+        />
+
+        <SidebarItem
+          label="Code"
+          icon={<Icon name="code" />}
+          disabled
+          badge="Next"
+        />
+
+        <SidebarItem
+          label="Customize"
+          icon={<Icon name="sliders" />}
+          disabled
+          badge="Next"
+        />
+      </nav>
+
+      <div className="mt-5 px-3 text-[11px] font-medium uppercase tracking-[0.12em] text-[#827d75]">
+        Products
+      </div>
+
+      <div className="mt-1">
+        <SidebarItem
+          label="Design"
+          icon={<Icon name="palette" />}
+          disabled
+          badge="Next"
+        />
+      </div>
+
+      <div className="mt-5 flex min-h-0 flex-1 flex-col">
+        <div className="flex items-center justify-between px-3">
+          <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-[#827d75]">
+            Recents
           </p>
+
+          <span className="text-[11px] text-[#777169]">
+            {conversations.length}
+          </span>
+        </div>
+
+        <div className="mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-1">
+          {bootstrapLoading && (
+            <div className="space-y-2 px-3 py-2">
+              <div className="h-3 w-4/5 animate-pulse rounded bg-[#2f2f2c]" />
+              <div className="h-3 w-3/5 animate-pulse rounded bg-[#2b2b29]" />
+              <div className="h-3 w-2/3 animate-pulse rounded bg-[#2b2b29]" />
+            </div>
+          )}
+
+          {!bootstrapLoading &&
+            conversations.length === 0 && (
+              <p className="px-3 py-3 text-xs leading-5 text-[#827d75]">
+                Your conversations will appear here.
+              </p>
+            )}
+
+          {!bootstrapLoading &&
+            conversations.map((conversation) => (
+              <button
+                key={conversation.id}
+                type="button"
+                onClick={() =>
+                  openConversation(conversation)
+                }
+                className={[
+                  'w-full rounded-lg px-3 py-2 text-left transition hover:bg-[#2b2b29]',
+                  conversation.id === conversationId
+                    ? 'bg-[#2b2b29]'
+                    : '',
+                ].join(' ')}
+              >
+                <p className="truncate text-sm text-[#ddd7ce]">
+                  {conversation.title ||
+                    'Untitled conversation'}
+                </p>
+
+                <p className="mt-1 text-[10px] text-[#817b73]">
+                  {formatConversationDate(
+                    conversation.created_at
+                  )}
+                </p>
+              </button>
+            ))}
+        </div>
+      </div>
+
+      <div className="mt-3 border-t border-[#33322f] pt-3">
+        <div className="flex items-center gap-3 rounded-xl px-2 py-2">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#e5ded3] text-xs font-semibold text-[#2a2926]">
+            {profile
+              ? getInitials(profile.full_name)
+              : 'U'}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-[#eee9e1]">
+              {profile?.full_name || 'Loading...'}
+            </p>
+
+            <p className="truncate text-[11px] text-[#8f8981]">
+              {(creditsRemaining ?? 0).toLocaleString()}{' '}
+              credits
+            </p>
+          </div>
 
           <button
             type="button"
-            onClick={() => navigate('/portal')}
-            className="mt-6 bg-white text-black px-5 py-3 rounded-xl font-semibold"
+            onClick={handleSignOut}
+            disabled={signingOut}
+            className="rounded-lg p-2 text-[#8f8981] transition hover:bg-[#2b2b29] hover:text-[#eee9e1] disabled:opacity-50"
+            aria-label="Sign out"
+            title="Sign out"
           >
-            Return to Portal
+            <Icon
+              name="logout"
+              className="h-4 w-4"
+            />
           </button>
         </div>
       </div>
-    )
-  }
-
-  if (!model) {
-    return null
-  }
+    </div>
+  )
 
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col">
-      <header className="border-b border-white/10 px-6 py-4">
-        <div className="max-w-5xl w-full mx-auto flex items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
+    <div className="min-h-screen bg-[#1f1f1d] text-[#eee9e1]">
+      <div className="min-h-screen lg:grid lg:grid-cols-[288px_minmax(0,1fr)]">
+        <aside className="hidden min-h-screen border-r border-[#33322f] lg:block">
+          <div className="fixed inset-y-0 w-[288px]">
+            {sidebar}
+          </div>
+        </aside>
+
+        {sidebarOpen && (
+          <div className="fixed inset-0 z-50 lg:hidden">
             <button
               type="button"
-              onClick={() => navigate('/portal')}
-              className="text-gray-300 hover:text-white"
-            >
-              ← Back to Portal
-            </button>
+              className="absolute inset-0 bg-black/60"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Close sidebar"
+            />
 
-            <button
-              type="button"
-              onClick={startNewChat}
-              disabled={sending}
-              className="border border-white/15 rounded-xl px-4 py-2 text-sm hover:bg-white/5 disabled:opacity-50"
-            >
-              + New Chat
-            </button>
+            <aside className="relative h-full w-[288px] border-r border-[#33322f]">
+              {sidebar}
+            </aside>
           </div>
+        )}
 
-          <div className="text-right">
-            <h1 className="font-bold">
-              {model.name}
-            </h1>
+        <main className="relative flex min-h-screen min-w-0 flex-col">
+          <header className="sticky top-0 z-30 border-b border-[#30302d] bg-[#1f1f1d]/95 backdrop-blur">
+            <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-6">
+              <div className="flex min-w-0 items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(true)}
+                  className="rounded-lg p-2 text-[#cfc8bf] hover:bg-[#2b2b29] lg:hidden"
+                  aria-label="Open sidebar"
+                >
+                  <Icon name="menu" />
+                </button>
 
-            <p className="text-sm text-gray-400">
-              {model.provider}
-            </p>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-[#e9e4dc]">
+                    {pageTitle}
+                  </p>
 
-            {creditsRemaining !== null && (
-              <p
-                className={
-                  creditsRemaining > 0
-                    ? 'text-sm text-green-400 mt-1'
-                    : 'text-sm text-yellow-300 mt-1'
-                }
-              >
-                {creditsRemaining.toLocaleString()}{' '}
-                credits remaining
-              </p>
-            )}
-          </div>
-        </div>
-      </header>
+                  <p className="truncate text-[11px] text-[#7f7971]">
+                    Claude {selectedModelName}
+                  </p>
+                </div>
+              </div>
 
-      <main className="max-w-5xl w-full mx-auto px-6 py-8 flex-1 flex flex-col">
-        <div className="mb-6">
-          <h2 className="text-3xl font-bold">
-            Chat with {model.name}
-          </h2>
+              <div className="flex items-center gap-3">
+                <span className="hidden text-xs text-[#8e877f] sm:inline">
+                  {(creditsRemaining ?? 0).toLocaleString()}{' '}
+                  credits
+                </span>
 
-          <p className="text-gray-400 mt-2">
-            {model.description}
-          </p>
-
-          {conversationId && (
-            <p className="text-xs text-gray-600 mt-2">
-              Conversation saved
-            </p>
-          )}
-        </div>
-
-        <div className="flex-1 min-h-[420px] border border-white/10 rounded-2xl p-5 overflow-y-auto space-y-5">
-          {messages.length === 0 && (
-            <div className="h-full min-h-[370px] flex items-center justify-center text-center px-6">
-              <p className="text-gray-500">
-                {canSendMessages
-                  ? `Send your first message to ${model.name}.`
-                  : 'Your saved conversations remain available. Add credits to continue chatting.'}
-              </p>
-            </div>
-          )}
-
-          {messages.map((chatMessage) => (
-            <div
-              key={chatMessage.id}
-              className={
-                chatMessage.role === 'user'
-                  ? 'flex justify-end'
-                  : 'flex justify-start'
-              }
-            >
-              <div
-                className={
-                  chatMessage.role === 'user'
-                    ? 'max-w-[80%] rounded-2xl bg-white text-black px-5 py-4'
-                    : 'max-w-[80%] rounded-2xl bg-white/10 text-white px-5 py-4'
-                }
-              >
-                <p className="whitespace-pre-wrap">
-                  {chatMessage.content}
-                </p>
+                <button
+                  type="button"
+                  onClick={() => startNewChat()}
+                  disabled={
+                    bootstrapLoading ||
+                    !activeModel
+                  }
+                  className="rounded-lg border border-[#3b3a37] bg-[#292927] px-3 py-2 text-xs font-medium text-[#e9e4dc] transition hover:bg-[#333330] disabled:opacity-45"
+                >
+                  New chat
+                </button>
               </div>
             </div>
-          ))}
+          </header>
 
-          {sending && (
-            <div className="flex justify-start">
-              <div className="rounded-2xl bg-white/10 px-5 py-4 text-gray-400">
-                {model.name} is thinking...
+          <section className="flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-[760px] px-5 pb-48 pt-10 sm:px-8">
+              {bootstrapLoading && (
+                <div className="space-y-8 py-8">
+                  <div className="flex justify-end">
+                    <div className="h-16 w-2/3 animate-pulse rounded-[20px] bg-[#292927]" />
+                  </div>
+
+                  <div className="flex items-start gap-3">
+                    <div className="h-7 w-7 animate-pulse rounded-full bg-[#302c28]" />
+
+                    <div className="flex-1 space-y-3">
+                      <div className="h-3 w-full animate-pulse rounded bg-[#292927]" />
+                      <div className="h-3 w-5/6 animate-pulse rounded bg-[#292927]" />
+                      <div className="h-3 w-2/3 animate-pulse rounded bg-[#292927]" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!bootstrapLoading &&
+                conversationLoading && (
+                  <div className="space-y-8 py-8">
+                    <div className="flex justify-end">
+                      <div className="h-14 w-1/2 animate-pulse rounded-[20px] bg-[#292927]" />
+                    </div>
+
+                    <div className="flex items-start gap-3">
+                      <div className="h-7 w-7 animate-pulse rounded-full bg-[#302c28]" />
+
+                      <div className="flex-1 space-y-3">
+                        <div className="h-3 w-full animate-pulse rounded bg-[#292927]" />
+                        <div className="h-3 w-4/5 animate-pulse rounded bg-[#292927]" />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              {!bootstrapLoading &&
+                !conversationLoading &&
+                messages.length === 0 &&
+                !sending && (
+                  <div className="flex min-h-[54vh] flex-col items-center justify-center text-center">
+                    <div className="text-[#df6b45]">
+                      <Icon
+                        name="spark"
+                        className="h-10 w-10"
+                      />
+                    </div>
+
+                    <h1
+                      className="mt-5 text-4xl text-[#e5ded3]"
+                      style={{
+                        fontFamily:
+                          'Georgia, Cambria, Times New Roman, serif',
+                      }}
+                    >
+                      Start a conversation
+                    </h1>
+
+                    <p className="mt-3 max-w-md text-sm leading-6 text-[#8c857d]">
+                      Ask Claude to write, analyze,
+                      explain, plan, or help with code.
+                    </p>
+                  </div>
+                )}
+
+              {!bootstrapLoading &&
+                !conversationLoading && (
+                  <div className="space-y-9">
+                    {messages.map((chatMessage) => (
+                      <article
+                        key={chatMessage.id}
+                        className={
+                          chatMessage.role === 'user'
+                            ? 'flex justify-end'
+                            : 'flex items-start gap-3'
+                        }
+                      >
+                        {chatMessage.role ===
+                          'assistant' && (
+                          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#df6b45]">
+                            <Icon
+                              name="spark"
+                              className="h-6 w-6"
+                            />
+                          </div>
+                        )}
+
+                        <div
+                          className={
+                            chatMessage.role === 'user'
+                              ? 'max-w-[86%] rounded-[20px] bg-[#2c2c29] px-5 py-3.5 text-[#eee9e1]'
+                              : 'min-w-0 flex-1'
+                          }
+                        >
+                          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]">
+                            {chatMessage.content}
+                          </div>
+
+                          {chatMessage.role ===
+                            'assistant' && (
+                            <div className="mt-3 flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void copyMessage(
+                                    chatMessage
+                                  )
+                                }
+                                className="rounded-lg p-2 text-[#807a72] transition hover:bg-[#2b2b29] hover:text-[#cfc8bf]"
+                                title="Copy response"
+                                aria-label="Copy response"
+                              >
+                                <Icon
+                                  name={
+                                    copiedMessageId ===
+                                    chatMessage.id
+                                      ? 'check'
+                                      : 'copy'
+                                  }
+                                  className="h-4 w-4"
+                                />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+
+                    {sending && (
+                      <div className="flex items-start gap-3">
+                        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#df6b45]">
+                          <Icon
+                            name="spark"
+                            className="h-6 w-6"
+                          />
+                        </div>
+
+                        <div className="pt-1 text-sm text-[#8f8981]">
+                          Claude {selectedModelName} is
+                          thinking
+                          <span className="animate-pulse">
+                            ...
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div ref={messagesEndRef} />
+                  </div>
+                )}
+            </div>
+          </section>
+
+          <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-gradient-to-t from-[#1f1f1d] via-[#1f1f1d] to-transparent pb-4 pt-14 lg:left-[288px]">
+            <div className="pointer-events-auto mx-auto w-full max-w-[780px] px-4 sm:px-6">
+              {error && (
+                <div className="mb-3 rounded-xl border border-red-900/60 bg-red-950/35 px-4 py-3 text-sm text-red-200">
+                  {error}
+                </div>
+              )}
+
+              {accessMessage && (
+                <div className="mb-3 rounded-xl border border-amber-900/50 bg-amber-950/25 px-4 py-3 text-sm text-amber-200">
+                  {accessMessage}
+                </div>
+              )}
+
+              <form
+                onSubmit={sendMessage}
+                className="rounded-[22px] border border-[#3a3936] bg-[#2a2a28] p-3 shadow-[0_18px_55px_rgba(0,0,0,0.32)]"
+              >
+                <textarea
+                  value={message}
+                  onChange={(event) =>
+                    setMessage(event.target.value)
+                  }
+                  onKeyDown={handleKeyDown}
+                  placeholder={`Message Claude ${selectedModelName}...`}
+                  rows={2}
+                  maxLength={10000}
+                  disabled={
+                    sending ||
+                    bootstrapLoading ||
+                    conversationLoading ||
+                    !canSendMessages
+                  }
+                  className="max-h-48 min-h-[54px] w-full resize-none bg-transparent px-2 py-2 text-[15px] leading-6 text-[#eee9e1] outline-none placeholder:text-[#8b857d] disabled:cursor-not-allowed disabled:opacity-60"
+                />
+
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    disabled
+                    title="File and image uploads are the next feature"
+                    className="rounded-lg p-2 text-[#d8d2c9] opacity-55"
+                  >
+                    <Icon name="plus" />
+                  </button>
+
+                  <div className="flex min-w-0 items-center gap-1">
+                    <select
+                      value={activeModelId}
+                      onChange={(event) =>
+                        changeModel(
+                          event.target.value
+                        )
+                      }
+                      disabled={
+                        sending ||
+                        bootstrapLoading ||
+                        models.length === 0
+                      }
+                      className="max-w-[190px] cursor-pointer appearance-none bg-transparent px-2 py-2 text-right text-sm font-semibold text-[#eee9e1] outline-none disabled:opacity-50"
+                      aria-label="Claude model"
+                    >
+                      {models.map(
+                        (candidate) => (
+                          <option
+                            key={candidate.id}
+                            value={candidate.id}
+                            className="bg-[#2a2a28] text-[#eee9e1]"
+                          >
+                            {candidate.name.replace(
+                              /^Claude\s+/i,
+                              ''
+                            )}
+                          </option>
+                        )
+                      )}
+                    </select>
+
+                    <button
+                      type="button"
+                      disabled
+                      title="Reasoning controls are coming next"
+                      className="rounded-lg px-2 py-2 text-xs text-[#9b958d]"
+                    >
+                      Medium⌄
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled
+                      title="Voice input is coming later"
+                      className="rounded-lg p-2 text-[#aaa49c] opacity-50"
+                    >
+                      <Icon name="mic" />
+                    </button>
+
+                    {message.trim() ? (
+                      <button
+                        type="submit"
+                        disabled={
+                          sending ||
+                          bootstrapLoading ||
+                          conversationLoading ||
+                          !canSendMessages
+                        }
+                        className="rounded-full bg-[#eee9e1] p-2 text-[#272624] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                        aria-label="Send message"
+                      >
+                        <Icon
+                          name="send"
+                          className="h-4 w-4"
+                        />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled
+                        title="Voice conversation is coming later"
+                        className="rounded-lg p-2 text-[#aaa49c] opacity-50"
+                      >
+                        <Icon name="wave" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </form>
+
+              <div className="mt-2 flex items-center justify-center gap-3 text-[10px] text-[#66615b]">
+                <span>
+                  Claude can make mistakes. Review
+                  important information.
+                </span>
+
+                {lastCreditsUsed !== null && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Last response used{' '}
+                      {lastCreditsUsed}{' '}
+                      {lastCreditsUsed === 1
+                        ? 'credit'
+                        : 'credits'}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {error && (
-          <div className="mt-4 border border-red-500/30 bg-red-500/10 text-red-300 rounded-xl px-4 py-3">
-            {error}
           </div>
-        )}
-
-        {lastCreditsUsed !== null && (
-          <p className="mt-4 text-sm text-gray-400">
-            Last response used {lastCreditsUsed}{' '}
-            credit
-            {lastCreditsUsed === 1 ? '' : 's'}.
-          </p>
-        )}
-
-        {!canSendMessages && accessMessage && (
-          <div className="mt-6 border border-yellow-500/30 bg-yellow-500/10 rounded-2xl p-5">
-            <h3 className="font-bold text-yellow-200">
-              Chat access paused
-            </h3>
-
-            <p className="text-sm text-yellow-100/80 mt-2">
-              {accessMessage}
-            </p>
-
-            <button
-              type="button"
-              onClick={() => navigate('/portal')}
-              className="mt-4 rounded-xl border border-yellow-200/20 px-4 py-2 text-sm font-semibold text-yellow-100 transition hover:bg-yellow-100/10"
-            >
-              Return to Portal
-            </button>
-          </div>
-        )}
-
-        <form
-          onSubmit={sendMessage}
-          className="mt-6 flex gap-3"
-        >
-          <textarea
-            value={message}
-            onChange={(event) =>
-              setMessage(event.target.value)
-            }
-            onKeyDown={handleKeyDown}
-            placeholder={
-              canSendMessages
-                ? `Message ${model.name}...`
-                : 'Add credits to continue chatting.'
-            }
-            rows={3}
-            maxLength={10000}
-            disabled={sending || !canSendMessages}
-            className="flex-1 resize-none bg-white/5 border border-white/10 rounded-2xl p-4 outline-none focus:border-white/30 disabled:opacity-60"
-          />
-
-          <button
-            type="submit"
-            disabled={
-              sending ||
-              !canSendMessages ||
-              !message.trim()
-            }
-            className="self-end bg-white text-black px-7 py-4 rounded-2xl font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {sending ? 'Sending...' : 'Send'}
-          </button>
-        </form>
-
-        <p className="text-xs text-gray-600 mt-3">
-          {canSendMessages
-            ? 'Press Enter to send. Use Shift + Enter for a new line.'
-            : 'Chat history is still readable while access is inactive.'}
-        </p>
-      </main>
+        </main>
+      </div>
     </div>
   )
 }
