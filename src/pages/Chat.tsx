@@ -36,15 +36,42 @@ type ChatMessage = {
   content: string
 }
 
-type ChatApiResponse = {
-  success: boolean
-  reply?: string
+type ChatErrorResponse = {
+  success?: boolean
   error?: string
-  conversationId?: string
-  creditsRemaining?: number
-  creditsUsed?: number
-  providerCostUsd?: number
 }
+
+type ChatStreamEvent =
+  | {
+      type: 'start'
+      model?: {
+        id: string
+        name: string
+        provider: string
+        modelKey: string
+      }
+    }
+  | {
+      type: 'delta'
+      delta: string
+    }
+  | {
+      type: 'complete'
+      responseId: string
+      conversationId: string
+      creditsRemaining: number
+      creditsUsed: number
+      providerCostUsd: number
+    }
+  | {
+      type: 'error'
+      error: string
+    }
+
+type ChatStreamCompleteEvent = Extract<
+  ChatStreamEvent,
+  { type: 'complete' }
+>
 
 type HistoryConversation = {
   id: string
@@ -77,9 +104,9 @@ type SidebarItemProps = {
   badge?: string
 }
 
-const CHAT_API_URL = import.meta.env.DEV
-  ? 'https://ai-tools-portal-9h5.pages.dev/api/chat'
-  : '/api/chat'
+const CHAT_STREAM_API_URL = import.meta.env.DEV
+  ? 'https://ai-tools-portal-9h5.pages.dev/api/chat-stream'
+  : '/api/chat-stream'
 
 const HISTORY_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/history'
@@ -403,6 +430,11 @@ function Chat() {
   ] = useState(false)
 
   const [sending, setSending] = useState(false)
+
+  const [
+    streamingMessageId,
+    setStreamingMessageId,
+  ] = useState<string | null>(null)
 
   const [sidebarOpen, setSidebarOpen] =
     useState(false)
@@ -950,8 +982,20 @@ function Chat() {
       return
     }
 
+    /*
+     * Capture the selected model before the asynchronous request
+     * begins. The model selector is disabled while streaming, but
+     * this stable reference also keeps TypeScript and navigation
+     * behavior deterministic.
+     */
+    const selectedModel = activeModel
+    const assistantMessageId = crypto.randomUUID()
+
+    let assistantStarted = false
+
     setError(null)
     setSending(true)
+    setStreamingMessageId(null)
     setMessage('')
 
     const userMessage: ChatMessage = {
@@ -981,54 +1025,200 @@ function Chat() {
         )
       }
 
-      const response = await fetch(CHAT_API_URL, {
-        method: 'POST',
-        headers: {
-          Authorization:
-            `Bearer ${session.access_token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          modelId: activeModel.id,
-          message: cleanedMessage,
-          conversationId,
-        }),
-      })
+      const response = await fetch(
+        CHAT_STREAM_API_URL,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+            Accept:
+              'application/x-ndjson, application/json',
+          },
+          body: JSON.stringify({
+            modelId: selectedModel.id,
+            message: cleanedMessage,
+            conversationId,
+          }),
+        }
+      )
 
-      let result: ChatApiResponse
+      if (!response.ok) {
+        const responseText =
+          await response.text()
+
+        let responseError =
+          'The Claude request failed.'
+
+        try {
+          const result =
+            JSON.parse(
+              responseText
+            ) as ChatErrorResponse
+
+          if (result.error?.trim()) {
+            responseError = result.error.trim()
+          }
+        } catch {
+          if (responseText.trim()) {
+            responseError = responseText.trim()
+          }
+        }
+
+        throw new Error(responseError)
+      }
+
+      if (!response.body) {
+        throw new Error(
+          'The server did not return a response stream.'
+        )
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+
+      let buffer = ''
+
+      const streamResult: {
+        completion:
+          | ChatStreamCompleteEvent
+          | null
+      } = {
+        completion: null,
+      }
+
+      function applyStreamEvent(
+        event: ChatStreamEvent
+      ) {
+        if (event.type === 'delta') {
+          if (!event.delta) {
+            return
+          }
+
+          if (!assistantStarted) {
+            assistantStarted = true
+
+            setStreamingMessageId(
+              assistantMessageId
+            )
+
+            setMessages((currentMessages) => [
+              ...currentMessages,
+              {
+                id: assistantMessageId,
+                role: 'assistant',
+                content: event.delta,
+              },
+            ])
+
+            return
+          }
+
+          setMessages((currentMessages) =>
+            currentMessages.map(
+              (chatMessage) =>
+                chatMessage.id ===
+                assistantMessageId
+                  ? {
+                      ...chatMessage,
+                      content:
+                        chatMessage.content +
+                        event.delta,
+                    }
+                  : chatMessage
+            )
+          )
+
+          return
+        }
+
+        if (event.type === 'complete') {
+          streamResult.completion = event
+          return
+        }
+
+        if (event.type === 'error') {
+          throw new Error(
+            event.error ||
+              'Claude could not complete the response.'
+          )
+        }
+      }
+
+      function processLine(rawLine: string) {
+        const line = rawLine.trim()
+
+        if (!line) {
+          return
+        }
+
+        let event: ChatStreamEvent
+
+        try {
+          event =
+            JSON.parse(line) as ChatStreamEvent
+        } catch {
+          throw new Error(
+            'The server returned an invalid streaming event.'
+          )
+        }
+
+        applyStreamEvent(event)
+      }
 
       try {
-        result =
-          (await response.json()) as ChatApiResponse
-      } catch {
+        while (true) {
+          const { value, done } =
+            await reader.read()
+
+          if (done) {
+            buffer += decoder.decode()
+            break
+          }
+
+          buffer += decoder.decode(value, {
+            stream: true,
+          })
+
+          const lines = buffer.split('\n')
+          buffer = lines.pop() ?? ''
+
+          for (const line of lines) {
+            processLine(line)
+          }
+        }
+
+        if (buffer.trim()) {
+          processLine(buffer)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+
+      const completion =
+        streamResult.completion
+
+      if (!completion) {
         throw new Error(
-          'The server returned an invalid response.'
+          'The response stream ended before completion.'
         )
       }
 
-      if (!response.ok || !result.success) {
-        throw new Error(
-          result.error || 'The Claude request failed.'
-        )
-      }
-
-      if (!result.reply) {
+      if (!assistantStarted) {
         throw new Error(
           'Claude returned an empty response.'
         )
       }
 
-      if (
-        typeof result.conversationId !== 'string' ||
-        !result.conversationId.trim()
-      ) {
+      const returnedConversationId =
+        completion.conversationId?.trim()
+
+      if (!returnedConversationId) {
         throw new Error(
           'The server did not return a valid conversation ID.'
         )
       }
-
-      const returnedConversationId =
-        result.conversationId.trim()
 
       loadedConversationIdRef.current =
         returnedConversationId
@@ -1041,39 +1231,22 @@ function Chat() {
         )
       }
 
-      if (
-        typeof result.creditsRemaining === 'number'
-      ) {
-        setCreditsRemaining(
-          result.creditsRemaining
-        )
+      setCreditsRemaining(
+        completion.creditsRemaining
+      )
 
-        if (result.creditsRemaining <= 0) {
-          setSubscriptionStatus('inactive')
-        }
+      if (completion.creditsRemaining <= 0) {
+        setSubscriptionStatus('inactive')
       }
 
-      if (
-        typeof result.creditsUsed === 'number'
-      ) {
-        setLastCreditsUsed(
-          result.creditsUsed
-        )
-      }
+      setLastCreditsUsed(
+        completion.creditsUsed
+      )
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: result.reply,
-      }
-
-      setMessages((currentMessages) => [
-        ...currentMessages,
-        assistantMessage,
-      ])
+      setStreamingMessageId(null)
 
       navigate(
-        `/chat/${activeModel.id}?conversation=${returnedConversationId}`,
+        `/chat/${selectedModel.id}?conversation=${returnedConversationId}`,
         { replace: true }
       )
 
@@ -1090,18 +1263,26 @@ function Chat() {
 
       setError(errorMessage)
 
-      setMessages((currentMessages) => [
-        ...currentMessages,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: `Error: ${errorMessage}`,
-        },
-      ])
+      /*
+       * Keep any partial streamed response visible. Only create an
+       * assistant error message when no response text arrived.
+       */
+      if (!assistantStarted) {
+        setMessages((currentMessages) => [
+          ...currentMessages,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: `Error: ${errorMessage}`,
+          },
+        ])
+      }
     } finally {
+      setStreamingMessageId(null)
       setSending(false)
     }
   }
+
 
   function sendMessage(event?: FormEvent) {
     event?.preventDefault()
@@ -1564,12 +1745,32 @@ function Chat() {
                               : 'min-w-0 flex-1'
                           }
                         >
-                          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]">
+                          <div
+                            className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]"
+                            aria-live={
+                              chatMessage.id ===
+                              streamingMessageId
+                                ? 'polite'
+                                : undefined
+                            }
+                          >
                             {chatMessage.content}
+
+                            {chatMessage.id ===
+                              streamingMessageId && (
+                              <span
+                                className="ml-0.5 inline-block animate-pulse text-[#df6b45]"
+                                aria-hidden="true"
+                              >
+                                ▍
+                              </span>
+                            )}
                           </div>
 
                           {chatMessage.role ===
-                            'assistant' && (
+                            'assistant' &&
+                            chatMessage.id !==
+                              streamingMessageId && (
                             <div className="mt-3 flex items-center gap-1">
                               <button
                                 type="button"
@@ -1598,7 +1799,8 @@ function Chat() {
                       </article>
                     ))}
 
-                    {sending && (
+                    {sending &&
+                      streamingMessageId === null && (
                       <div className="flex items-start gap-3">
                         <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#df6b45]">
                           <Icon
