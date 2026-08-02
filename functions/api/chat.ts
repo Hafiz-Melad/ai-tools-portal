@@ -24,12 +24,24 @@ type CreditResult = {
 
 type ConversationMemory = {
   id: string
+  model_id: string
   provider_response_id: string | null
+}
+
+type ConversationMessage = {
+  role: string
+  content: string
+  created_at: string
+}
+
+type AgentInputMessage = {
+  role: 'user' | 'assistant'
+  content: string
 }
 
 type AgentRequestBody = {
   model: string
-  input: string
+  input: string | AgentInputMessage[]
   max_output_tokens: number
   stream: boolean
   store: boolean
@@ -127,7 +139,9 @@ function jsonResponse(
   })
 }
 
-function extractAgentText(response: AgentResponse): string {
+function extractAgentText(
+  response: AgentResponse
+): string {
   const textParts: string[] = []
 
   for (const outputItem of response.output ?? []) {
@@ -142,6 +156,40 @@ function extractAgentText(response: AgentResponse): string {
   }
 
   return textParts.join('\n\n')
+}
+
+function toAgentTranscript(
+  messages: ConversationMessage[],
+  newUserMessage: string
+): AgentInputMessage[] {
+  const transcript: AgentInputMessage[] = []
+
+  for (const savedMessage of messages) {
+    if (
+      savedMessage.role !== 'user' &&
+      savedMessage.role !== 'assistant'
+    ) {
+      continue
+    }
+
+    const content = savedMessage.content?.trim()
+
+    if (!content) {
+      continue
+    }
+
+    transcript.push({
+      role: savedMessage.role,
+      content,
+    })
+  }
+
+  transcript.push({
+    role: 'user',
+    content: newUserMessage,
+  })
+
+  return transcript
 }
 
 export async function onRequestOptions(
@@ -478,13 +526,19 @@ export async function onRequestPost(
     }
 
     /*
-     * Load the previous Perplexity response ID when this is
-     * an existing conversation.
+     * Existing chats are owned by the user, but are no longer
+     * permanently tied to one model.
      *
-     * The ownership and model checks prevent a customer from
-     * continuing another customer's conversation.
+     * When the selected model matches the most recently used
+     * model, the stored provider response ID can continue the
+     * provider-side chain.
+     *
+     * When the user switches models, the full saved transcript
+     * is sent to the newly selected model instead.
      */
     let previousResponseId: string | null = null
+    let conversationMessages: ConversationMessage[] = []
+    let modelSwitched = false
 
     if (requestedConversationId) {
       const {
@@ -492,10 +546,11 @@ export async function onRequestPost(
         error: conversationError,
       } = await supabaseAdmin
         .from('conversations')
-        .select('id, provider_response_id')
+        .select(
+          'id, model_id, provider_response_id'
+        )
         .eq('id', requestedConversationId)
         .eq('user_id', user.id)
-        .eq('model_id', selectedModel.id)
         .maybeSingle()
 
       if (conversationError) {
@@ -519,22 +574,62 @@ export async function onRequestPost(
         )
       }
 
+      modelSwitched =
+        conversation.model_id !== selectedModel.id
+
       if (
+        !modelSwitched &&
         typeof conversation.provider_response_id ===
           'string' &&
         conversation.provider_response_id.trim()
       ) {
         previousResponseId =
           conversation.provider_response_id.trim()
+      } else {
+        const {
+          data: messageRows,
+          error: transcriptError,
+        } = await supabaseAdmin
+          .from('messages')
+          .select('role, content, created_at')
+          .eq(
+            'conversation_id',
+            requestedConversationId
+          )
+          .in('role', ['user', 'assistant'])
+          .order('created_at', {
+            ascending: true,
+          })
+
+        if (transcriptError) {
+          throw new Error(
+            `Could not load the conversation transcript: ${transcriptError.message}`
+          )
+        }
+
+        conversationMessages =
+          (messageRows ?? []) as ConversationMessage[]
       }
     }
 
     /*
-     * Prepare the Perplexity Agent API request.
+     * Prepare the Agent API request.
+     *
+     * A normal same-model continuation uses the compact
+     * previous_response_id chain. A model switch sends the
+     * saved user/assistant transcript plus the new message.
      */
     const agentRequestBody: AgentRequestBody = {
       model: selectedModel.model_key,
-      input: message,
+      input:
+        previousResponseId !== null
+          ? message
+          : requestedConversationId
+            ? toAgentTranscript(
+                conversationMessages,
+                message
+              )
+            : message,
       max_output_tokens: 600,
       stream: false,
       store: false,
@@ -681,17 +776,18 @@ export async function onRequestPost(
     }
 
     /*
-     * Save the exchange and the latest Perplexity response ID.
+     * Save the exchange with the model that produced it.
      *
-     * New conversations receive their first provider response
-     * ID. Existing conversations replace their stored response
-     * ID with the newest one.
+     * save_chat_exchange_v3 keeps an existing conversation
+     * even when the selected model changes, updates the latest
+     * conversation model, records the assistant message's model,
+     * and refreshes conversations.updated_at.
      */
     const {
       data: savedConversationId,
       error: historyError,
     } = await supabaseAdmin.rpc(
-      'save_chat_exchange_v2',
+      'save_chat_exchange_v3',
       {
         p_user_id: user.id,
         p_model_id: selectedModel.id,
@@ -723,7 +819,15 @@ export async function onRequestPost(
       success: true,
       responseId: providerResponseId,
       conversationId: savedConversationId,
-      memoryContinued: previousResponseId !== null,
+      memoryContinued:
+        requestedConversationId !== null,
+      modelSwitched,
+      continuityMethod:
+        previousResponseId !== null
+          ? 'provider_response'
+          : requestedConversationId
+            ? 'transcript'
+            : 'new_conversation',
       model: {
         id: selectedModel.id,
         name: selectedModel.name,
