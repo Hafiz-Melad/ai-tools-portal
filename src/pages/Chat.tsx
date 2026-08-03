@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
@@ -30,10 +31,48 @@ type AIModel = {
   enabled: boolean
 }
 
+type MessageAttachment = {
+  id: string
+  fileName: string
+  mimeType: string
+  sizeBytes: number
+  previewUrl: string
+}
+
+type PendingAttachment = MessageAttachment & {
+  localId: string
+  status: 'uploading' | 'ready' | 'error'
+  error?: string
+}
+
 type ChatMessage = {
   id: string
   role: 'user' | 'assistant'
   content: string
+  attachments?: MessageAttachment[]
+}
+
+type AttachmentUploadResponse = {
+  success: boolean
+  error?: string
+  attachment?: {
+    id: string
+    fileName: string
+    mimeType: string
+    sizeBytes: number
+    attachmentType: 'image' | 'document'
+    conversationId: string | null
+    status: 'pending'
+  }
+}
+
+type StoredAttachmentRow = {
+  id: string
+  message_id: string | null
+  storage_path: string
+  file_name: string
+  mime_type: string
+  size_bytes: number
 }
 
 type ChatErrorResponse = {
@@ -111,6 +150,20 @@ const CHAT_STREAM_API_URL = import.meta.env.DEV
 const HISTORY_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/history'
   : '/api/history'
+
+const UPLOAD_ATTACHMENT_API_URL = import.meta.env.DEV
+  ? 'https://ai-tools-portal-9h5.pages.dev/api/upload-attachment'
+  : '/api/upload-attachment'
+
+const MAX_ATTACHMENTS_PER_MESSAGE = 4
+const MAX_ATTACHMENT_SIZE_BYTES = 6 * 1024 * 1024
+
+const supportedImageMimeTypes = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+])
 
 function Icon({
   name,
@@ -382,6 +435,21 @@ function formatConversationDate(value: string): string {
   }).format(date)
 }
 
+function formatFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`
+  }
+
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`
+  }
+
+  return `${(
+    sizeBytes /
+    (1024 * 1024)
+  ).toFixed(1)} MB`
+}
+
 function Chat() {
   const { modelId: modelIdFromUrl } = useParams()
   const navigate = useNavigate()
@@ -397,6 +465,12 @@ function Chat() {
 
   const messagesEndRef =
     useRef<HTMLDivElement | null>(null)
+
+  const fileInputRef =
+    useRef<HTMLInputElement | null>(null)
+
+  const objectPreviewUrlsRef =
+    useRef<Set<string>>(new Set())
 
   const loadedConversationIdRef =
     useRef<string | null>(null)
@@ -420,6 +494,11 @@ function Chat() {
     useState<HistoryConversation[]>([])
 
   const [message, setMessage] = useState('')
+
+  const [
+    pendingAttachments,
+    setPendingAttachments,
+  ] = useState<PendingAttachment[]>([])
 
   const [bootstrapLoading, setBootstrapLoading] =
     useState(true)
@@ -484,11 +563,47 @@ function Chat() {
     subscriptionIsActive &&
     activeModel !== null
 
+  const attachmentUploadInProgress =
+    pendingAttachments.some(
+      (attachment) =>
+        attachment.status === 'uploading'
+    )
+
+  const readyAttachments =
+    pendingAttachments.filter(
+      (attachment) =>
+        attachment.status === 'ready'
+    )
+
+  const canSubmitMessage =
+    canSendMessages &&
+    !sending &&
+    !bootstrapLoading &&
+    !conversationLoading &&
+    !attachmentUploadInProgress &&
+    (
+      message.trim().length > 0 ||
+      readyAttachments.length > 0
+    )
+
   const accessMessage = !hasCredits
     ? 'No credits remain on this account. Contact the administrator to add credits.'
     : !subscriptionIsActive
       ? 'This Claude subscription is inactive.'
       : null
+
+  useEffect(() => {
+    return () => {
+      for (
+        const previewUrl of
+        objectPreviewUrlsRef.current
+      ) {
+        URL.revokeObjectURL(previewUrl)
+      }
+
+      objectPreviewUrlsRef.current.clear()
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -806,7 +921,7 @@ function Chat() {
           )
         }
 
-        const restoredMessages =
+        let restoredMessages: ChatMessage[] =
           (result.messages ?? [])
             .filter(
               (savedMessage) =>
@@ -821,6 +936,118 @@ function Chat() {
                   | 'assistant',
               content: savedMessage.content,
             }))
+
+        try {
+          const messageIds = restoredMessages.map(
+            (savedMessage) => savedMessage.id
+          )
+
+          if (messageIds.length > 0) {
+            const {
+              data: attachmentRows,
+              error: attachmentError,
+            } = await supabase
+              .from('chat_attachments')
+              .select(
+                'id, message_id, storage_path, file_name, mime_type, size_bytes'
+              )
+              .eq(
+                'conversation_id',
+                result.conversation.id
+              )
+              .eq('status', 'attached')
+              .in('message_id', messageIds)
+
+            if (attachmentError) {
+              throw attachmentError
+            }
+
+            const storedAttachments =
+              (attachmentRows ??
+                []) as StoredAttachmentRow[]
+
+            if (storedAttachments.length > 0) {
+              const {
+                data: signedRows,
+                error: signedUrlError,
+              } = await supabase.storage
+                .from('chat-attachments')
+                .createSignedUrls(
+                  storedAttachments.map(
+                    (attachment) =>
+                      attachment.storage_path
+                  ),
+                  60 * 60
+                )
+
+              if (signedUrlError) {
+                throw signedUrlError
+              }
+
+              const signedResults = (
+                signedRows ?? []
+              ) as Array<{
+                signedUrl?: string
+              }>
+
+              const attachmentsByMessage =
+                new Map<
+                  string,
+                  MessageAttachment[]
+                >()
+
+              storedAttachments.forEach(
+                (attachment, index) => {
+                  if (!attachment.message_id) {
+                    return
+                  }
+
+                  const previewUrl =
+                    signedResults[
+                      index
+                    ]?.signedUrl?.trim() ?? ''
+
+                  const currentAttachments =
+                    attachmentsByMessage.get(
+                      attachment.message_id
+                    ) ?? []
+
+                  currentAttachments.push({
+                    id: attachment.id,
+                    fileName:
+                      attachment.file_name,
+                    mimeType:
+                      attachment.mime_type,
+                    sizeBytes:
+                      attachment.size_bytes,
+                    previewUrl,
+                  })
+
+                  attachmentsByMessage.set(
+                    attachment.message_id,
+                    currentAttachments
+                  )
+                }
+              )
+
+              restoredMessages =
+                restoredMessages.map(
+                  (savedMessage) => ({
+                    ...savedMessage,
+                    attachments:
+                      attachmentsByMessage.get(
+                        savedMessage.id
+                      ),
+                  })
+                )
+            }
+          }
+        } catch (attachmentLoadError) {
+          console.error(
+            'Could not load message attachments:',
+            attachmentLoadError
+          )
+        }
 
         const storedModel = models.find(
           (candidate) =>
@@ -963,14 +1190,371 @@ function Chat() {
     }
   }
 
+  async function uploadAttachment(
+    draft: PendingAttachment,
+    file: File
+  ) {
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session?.access_token) {
+        throw new Error(
+          'Your login session has expired. Please log in again.'
+        )
+      }
+
+      const formData = new FormData()
+      formData.append('file', file)
+
+      if (conversationId) {
+        formData.append(
+          'conversationId',
+          conversationId
+        )
+      }
+
+      const response = await fetch(
+        UPLOAD_ATTACHMENT_API_URL,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+          },
+          body: formData,
+        }
+      )
+
+      let result: AttachmentUploadResponse
+
+      try {
+        result =
+          (await response.json()) as
+            AttachmentUploadResponse
+      } catch {
+        throw new Error(
+          'The upload server returned an invalid response.'
+        )
+      }
+
+      if (
+        !response.ok ||
+        !result.success ||
+        !result.attachment
+      ) {
+        throw new Error(
+          result.error ||
+            'The image could not be uploaded.'
+        )
+      }
+
+      if (
+        result.attachment.attachmentType !==
+        'image'
+      ) {
+        throw new Error(
+          'Only image attachments are enabled in this step.'
+        )
+      }
+
+      setPendingAttachments(
+        (currentAttachments) =>
+          currentAttachments.map(
+            (attachment) =>
+              attachment.localId ===
+              draft.localId
+                ? {
+                    ...attachment,
+                    id:
+                      result.attachment!.id,
+                    fileName:
+                      result.attachment!
+                        .fileName,
+                    mimeType:
+                      result.attachment!
+                        .mimeType,
+                    sizeBytes:
+                      result.attachment!
+                        .sizeBytes,
+                    status: 'ready',
+                    error: undefined,
+                  }
+                : attachment
+          )
+      )
+    } catch (uploadError) {
+      const uploadMessage =
+        uploadError instanceof Error
+          ? uploadError.message
+          : 'The image could not be uploaded.'
+
+      setPendingAttachments(
+        (currentAttachments) =>
+          currentAttachments.map(
+            (attachment) =>
+              attachment.localId ===
+              draft.localId
+                ? {
+                    ...attachment,
+                    status: 'error',
+                    error: uploadMessage,
+                  }
+                : attachment
+          )
+      )
+
+      setError(uploadMessage)
+    }
+  }
+
+  function handleAttachmentSelection(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const selectedFiles = Array.from(
+      event.target.files ?? []
+    )
+
+    event.target.value = ''
+
+    if (selectedFiles.length === 0) {
+      return
+    }
+
+    const availableSlots =
+      MAX_ATTACHMENTS_PER_MESSAGE -
+      pendingAttachments.length
+
+    if (availableSlots <= 0) {
+      setError(
+        `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} images to one message.`
+      )
+      return
+    }
+
+    const acceptedFiles =
+      selectedFiles.slice(0, availableSlots)
+
+    if (
+      selectedFiles.length >
+      availableSlots
+    ) {
+      setError(
+        `Only ${availableSlots} more ${
+          availableSlots === 1
+            ? 'image'
+            : 'images'
+        } can be attached.`
+      )
+    } else {
+      setError(null)
+    }
+
+    for (const file of acceptedFiles) {
+      const mimeType =
+        file.type.trim().toLowerCase()
+
+      if (
+        !supportedImageMimeTypes.has(
+          mimeType
+        )
+      ) {
+        setError(
+          `"${file.name}" is not a supported image. Use PNG, JPEG, WebP, or GIF.`
+        )
+        continue
+      }
+
+      if (
+        file.size <= 0 ||
+        file.size >
+          MAX_ATTACHMENT_SIZE_BYTES
+      ) {
+        setError(
+          `"${file.name}" must be smaller than 6 MB.`
+        )
+        continue
+      }
+
+      const previewUrl =
+        URL.createObjectURL(file)
+
+      objectPreviewUrlsRef.current.add(
+        previewUrl
+      )
+
+      const draft: PendingAttachment = {
+        id: '',
+        localId: crypto.randomUUID(),
+        fileName: file.name,
+        mimeType,
+        sizeBytes: file.size,
+        previewUrl,
+        status: 'uploading',
+      }
+
+      setPendingAttachments(
+        (currentAttachments) => [
+          ...currentAttachments,
+          draft,
+        ]
+      )
+
+      void uploadAttachment(draft, file)
+    }
+  }
+
+  async function removePendingAttachment(
+    attachment: PendingAttachment
+  ) {
+    if (attachment.status === 'uploading') {
+      setError(
+        'Wait for the image upload to finish before removing it.'
+      )
+      return
+    }
+
+    try {
+      if (
+        attachment.status === 'ready' &&
+        attachment.id
+      ) {
+        const {
+          data: storedAttachment,
+          error: lookupError,
+        } = await supabase
+          .from('chat_attachments')
+          .select('storage_path')
+          .eq('id', attachment.id)
+          .single()
+
+        if (lookupError) {
+          throw lookupError
+        }
+
+        const storagePath =
+          storedAttachment?.storage_path
+
+        if (
+          typeof storagePath !== 'string' ||
+          !storagePath.trim()
+        ) {
+          throw new Error(
+            'The stored image path is invalid.'
+          )
+        }
+
+        const {
+          error: storageDeleteError,
+        } = await supabase.storage
+          .from('chat-attachments')
+          .remove([storagePath])
+
+        if (storageDeleteError) {
+          throw storageDeleteError
+        }
+
+        const {
+          error: databaseDeleteError,
+        } = await supabase
+          .from('chat_attachments')
+          .delete()
+          .eq('id', attachment.id)
+
+        if (databaseDeleteError) {
+          throw databaseDeleteError
+        }
+      }
+
+      setPendingAttachments(
+        (currentAttachments) =>
+          currentAttachments.filter(
+            (candidate) =>
+              candidate.localId !==
+              attachment.localId
+          )
+      )
+
+      URL.revokeObjectURL(
+        attachment.previewUrl
+      )
+
+      objectPreviewUrlsRef.current.delete(
+        attachment.previewUrl
+      )
+
+      setError(null)
+    } catch (removeError) {
+      console.error(removeError)
+
+      setError(
+        removeError instanceof Error
+          ? removeError.message
+          : 'The image could not be removed.'
+      )
+    }
+  }
+
+  function discardPendingAttachments() {
+    const attachmentsToDiscard = [
+      ...pendingAttachments,
+    ]
+
+    setPendingAttachments([])
+
+    for (const attachment of attachmentsToDiscard) {
+      if (attachment.status === 'ready') {
+        void removePendingAttachment(attachment)
+      } else {
+        URL.revokeObjectURL(
+          attachment.previewUrl
+        )
+
+        objectPreviewUrlsRef.current.delete(
+          attachment.previewUrl
+        )
+      }
+    }
+  }
+
   async function sendText(
     cleanedMessage: string
   ) {
+    const selectedAttachments =
+      pendingAttachments.filter(
+        (attachment) =>
+          attachment.status === 'ready' &&
+          attachment.id
+      )
+
+    const effectiveMessage =
+      cleanedMessage ||
+      (
+        selectedAttachments.length === 1
+          ? 'Please analyze this image.'
+          : selectedAttachments.length > 1
+            ? 'Please analyze these images.'
+            : ''
+      )
+
     if (
-      !cleanedMessage ||
+      !effectiveMessage ||
       !activeModel ||
       sending
     ) {
+      return
+    }
+
+    if (attachmentUploadInProgress) {
+      setError(
+        'Wait for all image uploads to finish before sending.'
+      )
       return
     }
 
@@ -1001,7 +1585,23 @@ function Chat() {
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: cleanedMessage,
+      content: effectiveMessage,
+      attachments:
+        selectedAttachments.length > 0
+          ? selectedAttachments.map(
+              (attachment) => ({
+                id: attachment.id,
+                fileName:
+                  attachment.fileName,
+                mimeType:
+                  attachment.mimeType,
+                sizeBytes:
+                  attachment.sizeBytes,
+                previewUrl:
+                  attachment.previewUrl,
+              })
+            )
+          : undefined,
     }
 
     setMessages((currentMessages) => [
@@ -1038,8 +1638,12 @@ function Chat() {
           },
           body: JSON.stringify({
             modelId: selectedModel.id,
-            message: cleanedMessage,
+            message: effectiveMessage,
             conversationId,
+            attachmentIds:
+              selectedAttachments.map(
+                (attachment) => attachment.id
+              ),
           }),
         }
       )
@@ -1227,7 +1831,7 @@ function Chat() {
 
       if (!conversationTitle) {
         setConversationTitle(
-          cleanedMessage.slice(0, 100)
+          effectiveMessage.slice(0, 100)
         )
       }
 
@@ -1244,6 +1848,7 @@ function Chat() {
       )
 
       setStreamingMessageId(null)
+      setPendingAttachments([])
 
       navigate(
         `/chat/${selectedModel.id}?conversation=${returnedConversationId}`,
@@ -1264,18 +1869,19 @@ function Chat() {
       setError(errorMessage)
 
       /*
-       * Keep any partial streamed response visible. Only create an
-       * assistant error message when no response text arrived.
+       * Keep partial streamed text visible. When generation never
+       * started, remove the optimistic user message so the same
+       * uploaded images can be retried from the composer.
        */
       if (!assistantStarted) {
-        setMessages((currentMessages) => [
-          ...currentMessages,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: `Error: ${errorMessage}`,
-          },
-        ])
+        setMessages((currentMessages) =>
+          currentMessages.filter(
+            (chatMessage) =>
+              chatMessage.id !== userMessage.id
+          )
+        )
+
+        setMessage(cleanedMessage)
       }
     } finally {
       setStreamingMessageId(null)
@@ -1307,6 +1913,15 @@ function Chat() {
     if (!selectedModelId) {
       return
     }
+
+    if (attachmentUploadInProgress) {
+      setError(
+        'Wait for the image upload to finish before starting a new chat.'
+      )
+      return
+    }
+
+    discardPendingAttachments()
 
     pendingPromptRef.current = null
     loadedConversationIdRef.current = null
@@ -1352,6 +1967,14 @@ function Chat() {
   function openConversation(
     conversation: HistoryConversation
   ) {
+    if (attachmentUploadInProgress) {
+      setError(
+        'Wait for the image upload to finish before opening another conversation.'
+      )
+      return
+    }
+
+    discardPendingAttachments()
     loadedConversationIdRef.current = null
     setSidebarOpen(false)
 
@@ -1745,6 +2368,47 @@ function Chat() {
                               : 'min-w-0 flex-1'
                           }
                         >
+                          {chatMessage.attachments &&
+                            chatMessage.attachments
+                              .length > 0 && (
+                              <div className="mb-3 grid max-w-[520px] grid-cols-2 gap-2">
+                                {chatMessage.attachments.map(
+                                  (attachment) => (
+                                    <div
+                                      key={
+                                        attachment.id
+                                      }
+                                      className="overflow-hidden rounded-xl border border-[#44423e] bg-[#242422]"
+                                    >
+                                      {attachment.previewUrl ? (
+                                        <img
+                                          src={
+                                            attachment.previewUrl
+                                          }
+                                          alt={
+                                            attachment.fileName
+                                          }
+                                          className="h-36 w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="flex h-36 items-center justify-center px-3 text-center text-xs text-[#8f8981]">
+                                          {
+                                            attachment.fileName
+                                          }
+                                        </div>
+                                      )}
+
+                                      <div className="truncate px-3 py-2 text-[11px] text-[#aaa49c]">
+                                        {
+                                          attachment.fileName
+                                        }
+                                      </div>
+                                    </div>
+                                  )
+                                )}
+                              </div>
+                            )}
+
                           <div
                             className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]"
                             aria-live={
@@ -1843,13 +2507,95 @@ function Chat() {
                 onSubmit={sendMessage}
                 className="rounded-[22px] border border-[#3a3936] bg-[#2a2a28] p-3 shadow-[0_18px_55px_rgba(0,0,0,0.32)]"
               >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  multiple
+                  className="hidden"
+                  onChange={
+                    handleAttachmentSelection
+                  }
+                />
+
+                {pendingAttachments.length > 0 && (
+                  <div className="mb-3 grid grid-cols-2 gap-2 px-1 sm:grid-cols-4">
+                    {pendingAttachments.map(
+                      (attachment) => (
+                        <div
+                          key={attachment.localId}
+                          className="relative overflow-hidden rounded-xl border border-[#44423e] bg-[#232321]"
+                        >
+                          <img
+                            src={attachment.previewUrl}
+                            alt={attachment.fileName}
+                            className="h-24 w-full object-cover"
+                          />
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void removePendingAttachment(
+                                attachment
+                              )
+                            }
+                            disabled={
+                              attachment.status ===
+                              'uploading'
+                            }
+                            className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-sm text-white transition hover:bg-black disabled:cursor-wait disabled:opacity-50"
+                            aria-label={`Remove ${attachment.fileName}`}
+                            title={`Remove ${attachment.fileName}`}
+                          >
+                            ×
+                          </button>
+
+                          <div className="px-2 py-2">
+                            <p className="truncate text-[11px] text-[#d9d3ca]">
+                              {attachment.fileName}
+                            </p>
+
+                            <p
+                              className={[
+                                'mt-1 truncate text-[10px]',
+                                attachment.status ===
+                                'error'
+                                  ? 'text-red-300'
+                                  : 'text-[#817b73]',
+                              ].join(' ')}
+                              title={
+                                attachment.error
+                              }
+                            >
+                              {attachment.status ===
+                              'uploading'
+                                ? 'Uploading...'
+                                : attachment.status ===
+                                    'error'
+                                  ? attachment.error ||
+                                    'Upload failed'
+                                  : formatFileSize(
+                                      attachment.sizeBytes
+                                    )}
+                            </p>
+                          </div>
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
+
                 <textarea
                   value={message}
                   onChange={(event) =>
                     setMessage(event.target.value)
                   }
                   onKeyDown={handleKeyDown}
-                  placeholder={`Message Claude ${selectedModelName}...`}
+                  placeholder={
+                    pendingAttachments.length > 0
+                      ? 'Ask Claude about the attached images...'
+                      : `Message Claude ${selectedModelName}...`
+                  }
                   rows={2}
                   maxLength={10000}
                   disabled={
@@ -1864,9 +2610,20 @@ function Chat() {
                 <div className="mt-2 flex items-center justify-between gap-3">
                   <button
                     type="button"
-                    disabled
-                    title="File and image uploads are the next feature"
-                    className="rounded-lg p-2 text-[#d8d2c9] opacity-55"
+                    onClick={() =>
+                      fileInputRef.current?.click()
+                    }
+                    disabled={
+                      sending ||
+                      bootstrapLoading ||
+                      conversationLoading ||
+                      !canSendMessages ||
+                      pendingAttachments.length >=
+                        MAX_ATTACHMENTS_PER_MESSAGE
+                    }
+                    title="Attach images"
+                    className="rounded-lg p-2 text-[#d8d2c9] transition hover:bg-[#363633] disabled:cursor-not-allowed disabled:opacity-40"
+                    aria-label="Attach images"
                   >
                     <Icon name="plus" />
                   </button>
@@ -1921,14 +2678,12 @@ function Chat() {
                       <Icon name="mic" />
                     </button>
 
-                    {message.trim() ? (
+                    {message.trim() ||
+                    readyAttachments.length > 0 ? (
                       <button
                         type="submit"
                         disabled={
-                          sending ||
-                          bootstrapLoading ||
-                          conversationLoading ||
-                          !canSendMessages
+                          !canSubmitMessage
                         }
                         className="rounded-full bg-[#eee9e1] p-2 text-[#272624] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
                         aria-label="Send message"

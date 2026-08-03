@@ -16,6 +16,7 @@ type ChatRequest = {
   modelId?: string
   message?: string
   conversationId?: string | null
+  attachmentIds?: unknown
 }
 
 type CreditResult = {
@@ -37,6 +38,37 @@ type SelectedModel = {
   enabled: boolean
 }
 
+type AttachmentRecord = {
+  id: string
+  conversation_id: string | null
+  storage_path: string
+  file_name: string
+  mime_type: string
+  size_bytes: number
+  attachment_type: string
+  status: string
+}
+
+type AgentInputTextContent = {
+  type: 'input_text'
+  text: string
+}
+
+type AgentInputImageContent = {
+  type: 'input_image'
+  image_url: string
+}
+
+type AgentInputContent =
+  | AgentInputTextContent
+  | AgentInputImageContent
+
+type SaveChatExchangeResult = {
+  conversation_id: string
+  user_message_id: string
+  assistant_message_id: string
+}
+
 type ConversationMessage = {
   role: string
   content: string
@@ -45,7 +77,7 @@ type ConversationMessage = {
 
 type AgentInputMessage = {
   role: 'user' | 'assistant'
-  content: string
+  content: string | AgentInputContent[]
 }
 
 type AgentRequestBody = {
@@ -155,6 +187,18 @@ const allowedOrigins = [
  */
 const CREDITS_PER_USD = 10_000
 
+const ATTACHMENT_BUCKET = 'chat-attachments'
+const MAX_ATTACHMENTS_PER_MESSAGE = 4
+const MAX_ATTACHMENT_SIZE_BYTES = 6 * 1024 * 1024
+const SIGNED_IMAGE_URL_LIFETIME_SECONDS = 10 * 60
+
+const supportedImageMimeTypes = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+])
+
 function requireEnv(
   value: string | undefined,
   variableName: string
@@ -174,6 +218,70 @@ function isValidUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value
   )
+}
+
+function normalizeAttachmentIds(
+  value: unknown
+): {
+  attachmentIds: string[]
+  error: string | null
+} {
+  if (value === undefined || value === null) {
+    return {
+      attachmentIds: [],
+      error: null,
+    }
+  }
+
+  if (!Array.isArray(value)) {
+    return {
+      attachmentIds: [],
+      error:
+        'The attachment list has an invalid format.',
+    }
+  }
+
+  const attachmentIds: string[] = []
+
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      return {
+        attachmentIds: [],
+        error:
+          'The attachment list contains an invalid ID.',
+      }
+    }
+
+    const attachmentId = item.trim()
+
+    if (!isValidUuid(attachmentId)) {
+      return {
+        attachmentIds: [],
+        error:
+          'The attachment list contains an invalid ID.',
+      }
+    }
+
+    if (!attachmentIds.includes(attachmentId)) {
+      attachmentIds.push(attachmentId)
+    }
+  }
+
+  if (
+    attachmentIds.length >
+    MAX_ATTACHMENTS_PER_MESSAGE
+  ) {
+    return {
+      attachmentIds: [],
+      error:
+        `A maximum of ${MAX_ATTACHMENTS_PER_MESSAGE} images can be attached to one message.`,
+    }
+  }
+
+  return {
+    attachmentIds,
+    error: null,
+  }
 }
 
 function getCorsHeaders(
@@ -240,7 +348,7 @@ function extractAgentText(
 
 function toAgentTranscript(
   messages: ConversationMessage[],
-  newUserMessage: string
+  newUserContent: string | AgentInputContent[]
 ): AgentInputMessage[] {
   const transcript: AgentInputMessage[] = []
 
@@ -266,7 +374,7 @@ function toAgentTranscript(
 
   transcript.push({
     role: 'user',
-    content: newUserMessage,
+    content: newUserContent,
   })
 
   return transcript
@@ -459,6 +567,24 @@ export async function onRequestPost(
 
     const requestedConversationId =
       requestBody.conversationId?.trim() || null
+
+    const {
+      attachmentIds,
+      error: attachmentIdError,
+    } = normalizeAttachmentIds(
+      requestBody.attachmentIds
+    )
+
+    if (attachmentIdError) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error: attachmentIdError,
+        },
+        400
+      )
+    }
 
     if (!modelId) {
       return jsonResponse(
@@ -748,6 +874,192 @@ export async function onRequestPost(
       }
     }
 
+    let signedImageUrls: string[] = []
+
+    if (attachmentIds.length > 0) {
+      const {
+        data: attachmentRows,
+        error: attachmentError,
+      } = await supabaseAdmin
+        .from('chat_attachments')
+        .select(
+          'id, conversation_id, storage_path, file_name, mime_type, size_bytes, attachment_type, status'
+        )
+        .in('id', attachmentIds)
+        .eq('user_id', authenticatedUserId)
+
+      if (attachmentError) {
+        throw new Error(
+          `Could not load the selected attachments: ${attachmentError.message}`
+        )
+      }
+
+      const attachments =
+        (attachmentRows ?? []) as AttachmentRecord[]
+
+      if (
+        attachments.length !== attachmentIds.length
+      ) {
+        return jsonResponse(
+          context.request,
+          {
+            success: false,
+            error:
+              'One or more attachments were not found or access was denied.',
+          },
+          400
+        )
+      }
+
+      const attachmentById = new Map(
+        attachments.map((attachment) => [
+          attachment.id,
+          attachment,
+        ])
+      )
+
+      const orderedAttachments: AttachmentRecord[] =
+        []
+
+      for (const attachmentId of attachmentIds) {
+        const attachment =
+          attachmentById.get(attachmentId)
+
+        if (!attachment) {
+          return jsonResponse(
+            context.request,
+            {
+              success: false,
+              error:
+                'One or more attachments could not be resolved.',
+            },
+            400
+          )
+        }
+
+        if (
+          attachment.status !== 'pending' ||
+          attachment.attachment_type !== 'image'
+        ) {
+          return jsonResponse(
+            context.request,
+            {
+              success: false,
+              error:
+                'One or more attachments are no longer available for this message.',
+            },
+            400
+          )
+        }
+
+        if (
+          !supportedImageMimeTypes.has(
+            attachment.mime_type
+          )
+        ) {
+          return jsonResponse(
+            context.request,
+            {
+              success: false,
+              error:
+                `The image type for "${attachment.file_name}" is not supported.`,
+            },
+            415
+          )
+        }
+
+        if (
+          !Number.isFinite(attachment.size_bytes) ||
+          attachment.size_bytes <= 0 ||
+          attachment.size_bytes >
+            MAX_ATTACHMENT_SIZE_BYTES
+        ) {
+          return jsonResponse(
+            context.request,
+            {
+              success: false,
+              error:
+                `The image "${attachment.file_name}" has an invalid file size.`,
+            },
+            400
+          )
+        }
+
+        if (
+          attachment.conversation_id !== null &&
+          attachment.conversation_id !==
+            requestedConversationId
+        ) {
+          return jsonResponse(
+            context.request,
+            {
+              success: false,
+              error:
+                'An attachment belongs to a different conversation.',
+            },
+            400
+          )
+        }
+
+        orderedAttachments.push(attachment)
+      }
+
+      const {
+        data: signedRows,
+        error: signedUrlError,
+      } = await supabaseAdmin.storage
+        .from(ATTACHMENT_BUCKET)
+        .createSignedUrls(
+          orderedAttachments.map(
+            (attachment) =>
+              attachment.storage_path
+          ),
+          SIGNED_IMAGE_URL_LIFETIME_SECONDS
+        )
+
+      if (signedUrlError) {
+        throw new Error(
+          `Could not prepare the images for analysis: ${signedUrlError.message}`
+        )
+      }
+
+      const signedResults = (
+        signedRows ?? []
+      ) as Array<{
+        path?: string
+        signedUrl?: string
+        error?: string
+      }>
+
+      if (
+        signedResults.length !==
+        orderedAttachments.length
+      ) {
+        throw new Error(
+          'The image service did not return every required signed URL.'
+        )
+      }
+
+      signedImageUrls = signedResults.map(
+        (signedResult, index) => {
+          const signedUrl =
+            signedResult.signedUrl?.trim()
+
+          if (!signedUrl || signedResult.error) {
+            const fileName =
+              orderedAttachments[index]?.file_name ??
+              'attachment'
+
+            throw new Error(
+              `Could not prepare "${fileName}" for image analysis.`
+            )
+          }
+
+          return signedUrl
+        }
+      )
+    }
+
     const continuityMethod:
       | 'provider_response'
       | 'transcript'
@@ -758,17 +1070,53 @@ export async function onRequestPost(
           ? 'transcript'
           : 'new_conversation'
 
+    const currentUserContent:
+      | string
+      | AgentInputContent[] =
+      signedImageUrls.length > 0
+        ? [
+            {
+              type: 'input_text',
+              text: message,
+            },
+            ...signedImageUrls.map(
+              (signedImageUrl): AgentInputImageContent => ({
+                type: 'input_image',
+                image_url: signedImageUrl,
+              })
+            ),
+          ]
+        : message
+
+    const agentInput:
+      | string
+      | AgentInputMessage[] =
+      previousResponseId !== null
+        ? signedImageUrls.length > 0
+          ? [
+              {
+                role: 'user',
+                content: currentUserContent,
+              },
+            ]
+          : message
+        : requestedConversationId
+          ? toAgentTranscript(
+              conversationMessages,
+              currentUserContent
+            )
+          : signedImageUrls.length > 0
+            ? [
+                {
+                  role: 'user',
+                  content: currentUserContent,
+                },
+              ]
+            : message
+
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
-      input:
-        previousResponseId !== null
-          ? message
-          : requestedConversationId
-            ? toAgentTranscript(
-                conversationMessages,
-                message
-              )
-            : message,
+      input: agentInput,
       max_output_tokens: 600,
       stream: true,
       store: false,
@@ -1091,10 +1439,10 @@ export async function onRequestPost(
         }
 
         const {
-          data: savedConversationId,
+          data: savedExchangeData,
           error: historyError,
         } = await supabaseAdmin.rpc(
-          'save_chat_exchange_v3',
+          'save_chat_exchange_v4',
           {
             p_user_id: authenticatedUserId,
             p_model_id: resolvedModel.id,
@@ -1104,6 +1452,7 @@ export async function onRequestPost(
               requestedConversationId,
             p_provider_response_id:
               providerResponseId,
+            p_attachment_ids: attachmentIds,
           }
         )
 
@@ -1113,10 +1462,16 @@ export async function onRequestPost(
           )
         }
 
-        if (
-          typeof savedConversationId !== 'string' ||
-          !savedConversationId.trim()
-        ) {
+        const savedExchange = (
+          Array.isArray(savedExchangeData)
+            ? savedExchangeData[0]
+            : savedExchangeData
+        ) as SaveChatExchangeResult | null
+
+        const savedConversationId =
+          savedExchange?.conversation_id?.trim()
+
+        if (!savedConversationId) {
           throw new Error(
             'Chat history did not return a valid conversation ID.'
           )
@@ -1126,7 +1481,7 @@ export async function onRequestPost(
           type: 'complete',
           responseId: providerResponseId,
           conversationId:
-            savedConversationId.trim(),
+            savedConversationId,
           modelSwitched,
           continuityMethod,
           usage:
