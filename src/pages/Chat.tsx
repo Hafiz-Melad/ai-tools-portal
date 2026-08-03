@@ -85,6 +85,11 @@ type StoredAttachmentRow = {
   attachment_type: 'image' | 'document'
 }
 
+type ExtractedPdfText = {
+  text: string
+  textTruncated: boolean
+}
+
 type ChatErrorResponse = {
   success?: boolean
   error?: string
@@ -167,6 +172,13 @@ const UPLOAD_ATTACHMENT_API_URL = import.meta.env.DEV
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 4
 const MAX_ATTACHMENT_SIZE_BYTES = 6 * 1024 * 1024
+const MAX_EXTRACTED_DOCUMENT_CHARACTERS = 80_000
+const MAX_PDF_PAGES = 100
+const PDF_EXTRACTION_TIMEOUT_MS = 30_000
+
+let pdfJsModulePromise:
+  | Promise<typeof import('pdfjs-dist')>
+  | null = null
 
 const supportedImageMimeTypes = new Set([
   'image/png',
@@ -835,6 +847,200 @@ function getDocumentLabel(
     .toUpperCase()
 
   return extension || 'FILE'
+}
+
+async function loadBrowserPdfJs() {
+  if (!pdfJsModulePromise) {
+    pdfJsModulePromise = (async () => {
+      const [pdfJs, workerModule] =
+        await Promise.all([
+          import('pdfjs-dist'),
+          import(
+            'pdfjs-dist/build/pdf.worker.min.mjs?url'
+          ),
+        ])
+
+      pdfJs.GlobalWorkerOptions.workerSrc =
+        workerModule.default
+
+      return pdfJs
+    })()
+  }
+
+  return pdfJsModulePromise
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMilliseconds: number,
+  message: string
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = window.setTimeout(
+      () => reject(new Error(message)),
+      timeoutMilliseconds
+    )
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId)
+        resolve(value)
+      },
+      (reason) => {
+        window.clearTimeout(timeoutId)
+        reject(reason)
+      }
+    )
+  })
+}
+
+function normalizePdfText(value: string): string {
+  return value
+    .replace(/\u0000/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim()
+}
+
+async function extractPdfTextInBrowser(
+  file: File
+): Promise<ExtractedPdfText> {
+  const pdfJs = await loadBrowserPdfJs()
+  const bytes = new Uint8Array(
+    await file.arrayBuffer()
+  )
+
+  const loadingTask = pdfJs.getDocument({
+    data: bytes,
+    useSystemFonts: true,
+    isEvalSupported: false,
+  })
+
+  const extractionDeadline =
+    Date.now() + PDF_EXTRACTION_TIMEOUT_MS
+
+  function remainingTime(): number {
+    return Math.max(
+      1,
+      extractionDeadline - Date.now()
+    )
+  }
+
+  try {
+    const pdf = await withTimeout(
+      loadingTask.promise,
+      remainingTime(),
+      'PDF text extraction timed out.'
+    )
+
+    if (
+      pdf.numPages <= 0 ||
+      pdf.numPages > MAX_PDF_PAGES
+    ) {
+      throw new Error(
+        `PDF documents must contain between 1 and ${MAX_PDF_PAGES} pages.`
+      )
+    }
+
+    let extractedText = ''
+    let textTruncated = false
+
+    for (
+      let pageNumber = 1;
+      pageNumber <= pdf.numPages;
+      pageNumber += 1
+    ) {
+      const page = await withTimeout(
+        pdf.getPage(pageNumber),
+        remainingTime(),
+        'PDF text extraction timed out.'
+      )
+
+      const textContent = await withTimeout(
+        page.getTextContent(),
+        remainingTime(),
+        'PDF text extraction timed out.'
+      )
+
+      const pageLines: string[] = []
+      let currentLine = ''
+
+      for (const item of textContent.items) {
+        if (!('str' in item)) {
+          continue
+        }
+
+        const itemText = item.str.trim()
+
+        if (itemText) {
+          currentLine += currentLine
+            ? ` ${itemText}`
+            : itemText
+        }
+
+        if (item.hasEOL && currentLine) {
+          pageLines.push(currentLine)
+          currentLine = ''
+        }
+      }
+
+      if (currentLine) {
+        pageLines.push(currentLine)
+      }
+
+      const pageText = pageLines
+        .join('\n')
+        .trim()
+
+      if (!pageText) {
+        continue
+      }
+
+      const section =
+        `${extractedText ? '\n\n' : ''}` +
+        `[Page ${pageNumber}]\n${pageText}`
+
+      const remainingCharacters =
+        MAX_EXTRACTED_DOCUMENT_CHARACTERS -
+        extractedText.length
+
+      if (
+        section.length >
+        remainingCharacters
+      ) {
+        extractedText += section.slice(
+          0,
+          Math.max(0, remainingCharacters)
+        )
+        textTruncated = true
+        break
+      }
+
+      extractedText += section
+    }
+
+    extractedText =
+      normalizePdfText(extractedText)
+
+    if (!extractedText) {
+      throw new Error(
+        'No readable text was found in this PDF. Scanned PDFs require OCR, which is not enabled yet.'
+      )
+    }
+
+    return {
+      text: extractedText,
+      textTruncated,
+    }
+  } finally {
+    try {
+      await loadingTask.destroy()
+    } catch {
+      // Browser-side PDF cleanup is best effort.
+    }
+  }
 }
 
 function Chat() {
@@ -1601,6 +1807,26 @@ function Chat() {
 
       const formData = new FormData()
       formData.append('file', file)
+
+      if (
+        draft.mimeType ===
+        'application/pdf'
+      ) {
+        const extractedPdf =
+          await extractPdfTextInBrowser(file)
+
+        formData.append(
+          'extractedText',
+          extractedPdf.text
+        )
+
+        formData.append(
+          'textTruncated',
+          String(
+            extractedPdf.textTruncated
+          )
+        )
+      }
 
       if (conversationId) {
         formData.append(

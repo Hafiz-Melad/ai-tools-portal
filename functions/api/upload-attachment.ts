@@ -1,9 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
 import { unzipSync, strFromU8 } from 'fflate'
-import {
-  definePDFJSModule,
-  extractText as extractPdfText,
-} from 'unpdf'
 
 type Environment = {
   SUPABASE_URL?: string
@@ -102,21 +98,6 @@ const docxTextEntryNames = new Set([
   'word/footnotes.xml',
   'word/endnotes.xml',
 ])
-
-let pdfJsInitialization:
-  | Promise<void>
-  | null = null
-
-function ensureServerlessPdfJs(): Promise<void> {
-  if (!pdfJsInitialization) {
-    pdfJsInitialization =
-      definePDFJSModule(
-        () => import('unpdf/pdfjs')
-      )
-  }
-
-  return pdfJsInitialization
-}
 
 function requireEnv(
   value: string | undefined,
@@ -551,33 +532,36 @@ function limitExtractedText(
   }
 }
 
-async function extractPdfDocument(
-  bytes: Uint8Array
-): Promise<ExtractedDocument> {
+function extractProvidedPdfDocument(
+  bytes: Uint8Array,
+  providedText: string | null,
+  providedTextTruncated: boolean
+): ExtractedDocument {
   validatePdfSignature(bytes)
 
-  await ensureServerlessPdfJs()
-
-  const result = await extractPdfText(
-    bytes,
-    {
-      mergePages: true,
-    }
-  )
-
-  if (
-    result.totalPages <= 0 ||
-    result.totalPages > MAX_PDF_PAGES
-  ) {
+  if (!providedText?.trim()) {
     throw new HttpError(
       422,
-      `PDF documents must contain between 1 and ${MAX_PDF_PAGES} pages.`
+      'No readable text could be extracted from this PDF in the browser.'
     )
   }
 
-  return limitExtractedText(
-    result.text
-  )
+  if (providedText.length > 100_000) {
+    throw new HttpError(
+      413,
+      'The extracted PDF text is larger than the permitted processing limit.'
+    )
+  }
+
+  const extracted =
+    limitExtractedText(providedText)
+
+  return {
+    ...extracted,
+    textTruncated:
+      extracted.textTruncated ||
+      providedTextTruncated,
+  }
 }
 
 function extractDocxDocument(
@@ -731,10 +715,16 @@ function extractTextDocument(
 
 async function extractDocument(
   bytes: Uint8Array,
-  mimeType: string
+  mimeType: string,
+  providedPdfText: string | null,
+  providedPdfTextTruncated: boolean
 ): Promise<ExtractedDocument> {
   if (mimeType === 'application/pdf') {
-    return extractPdfDocument(bytes)
+    return extractProvidedPdfDocument(
+      bytes,
+      providedPdfText,
+      providedPdfTextTruncated
+    )
   }
 
   if (
@@ -846,6 +836,18 @@ export async function onRequestPost(
 
     const formData =
       await context.request.formData()
+
+    const rawExtractedText =
+      formData.get('extractedText')
+
+    const providedPdfText =
+      typeof rawExtractedText === 'string'
+        ? rawExtractedText
+        : null
+
+    const providedPdfTextTruncated =
+      formData.get('textTruncated') ===
+      'true'
 
     const fileEntry =
       formData.get('file')
@@ -969,7 +971,9 @@ export async function onRequestPost(
       extractedDocument =
         await extractDocument(
           fileBytes,
-          mimeType
+          mimeType,
+          providedPdfText,
+          providedPdfTextTruncated
         )
     }
 
