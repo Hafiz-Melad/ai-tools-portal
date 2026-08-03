@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { unzipSync, strFromU8 } from 'fflate'
 import {
+  definePDFJSModule,
   extractText as extractPdfText,
 } from 'unpdf'
 
@@ -101,6 +102,21 @@ const docxTextEntryNames = new Set([
   'word/footnotes.xml',
   'word/endnotes.xml',
 ])
+
+let pdfJsInitialization:
+  | Promise<void>
+  | null = null
+
+function ensureServerlessPdfJs(): Promise<void> {
+  if (!pdfJsInitialization) {
+    pdfJsInitialization =
+      definePDFJSModule(
+        () => import('unpdf/pdfjs')
+      )
+  }
+
+  return pdfJsInitialization
+}
 
 function requireEnv(
   value: string | undefined,
@@ -539,6 +555,8 @@ async function extractPdfDocument(
   bytes: Uint8Array
 ): Promise<ExtractedDocument> {
   validatePdfSignature(bytes)
+
+  await ensureServerlessPdfJs()
 
   const result = await extractPdfText(
     bytes,
