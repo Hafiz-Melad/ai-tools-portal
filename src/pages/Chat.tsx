@@ -44,6 +44,7 @@ type MessageAttachment = {
   fileName: string
   mimeType: string
   sizeBytes: number
+  attachmentType: 'image' | 'document'
   previewUrl: string
 }
 
@@ -81,6 +82,7 @@ type StoredAttachmentRow = {
   file_name: string
   mime_type: string
   size_bytes: number
+  attachment_type: 'image' | 'document'
 }
 
 type ChatErrorResponse = {
@@ -173,6 +175,31 @@ const supportedImageMimeTypes = new Set([
   'image/gif',
 ])
 
+const supportedDocumentMimeTypes = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+])
+
+const extensionMimeTypes: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.pdf': 'application/pdf',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.markdown': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+}
+
 function Icon({
   name,
   className = 'h-5 w-5',
@@ -181,6 +208,7 @@ function Icon({
     | 'plus'
     | 'chat'
     | 'folder'
+    | 'file'
     | 'artifact'
     | 'code'
     | 'sliders'
@@ -227,6 +255,17 @@ function Icon({
           d="M5 7.5V5.8a2 2 0 0 1 2-2h3.4l1.6 2H19"
           {...common}
         />
+      </>
+    ),
+    file: (
+      <>
+        <path
+          d="M6 3.5h8l4 4V20.5H6V3.5Z"
+          {...common}
+        />
+        <path d="M14 3.5v4h4" {...common} />
+        <path d="M9 12h6" {...common} />
+        <path d="M9 15.5h6" {...common} />
       </>
     ),
     artifact: (
@@ -732,6 +771,72 @@ function getImageExtension(
   }
 }
 
+function getFileExtension(fileName: string): string {
+  const normalized = fileName
+    .trim()
+    .toLowerCase()
+
+  const lastDot = normalized.lastIndexOf('.')
+
+  return lastDot >= 0
+    ? normalized.slice(lastDot)
+    : ''
+}
+
+function resolveAttachmentMimeType(
+  file: File
+): string {
+  const suppliedMimeType = file.type
+    .trim()
+    .toLowerCase()
+
+  if (
+    suppliedMimeType &&
+    suppliedMimeType !==
+      'application/octet-stream'
+  ) {
+    return suppliedMimeType
+  }
+
+  return (
+    extensionMimeTypes[
+      getFileExtension(file.name)
+    ] ?? ''
+  )
+}
+
+function getAttachmentType(
+  mimeType: string
+): 'image' | 'document' | null {
+  if (
+    supportedImageMimeTypes.has(mimeType)
+  ) {
+    return 'image'
+  }
+
+  if (
+    supportedDocumentMimeTypes.has(
+      mimeType
+    )
+  ) {
+    return 'document'
+  }
+
+  return null
+}
+
+function getDocumentLabel(
+  fileName: string
+): string {
+  const extension = getFileExtension(
+    fileName
+  )
+    .replace('.', '')
+    .toUpperCase()
+
+  return extension || 'FILE'
+}
+
 function Chat() {
   const { modelId: modelIdFromUrl } = useParams()
   const navigate = useNavigate()
@@ -1231,7 +1336,7 @@ function Chat() {
             } = await supabase
               .from('chat_attachments')
               .select(
-                'id, message_id, storage_path, file_name, mime_type, size_bytes'
+                'id, message_id, storage_path, file_name, mime_type, size_bytes, attachment_type'
               )
               .eq(
                 'conversation_id',
@@ -1302,6 +1407,8 @@ function Chat() {
                       attachment.mime_type,
                     sizeBytes:
                       attachment.size_bytes,
+                    attachmentType:
+                      attachment.attachment_type,
                     previewUrl,
                   })
 
@@ -1533,16 +1640,7 @@ function Chat() {
       ) {
         throw new Error(
           result.error ||
-            'The image could not be uploaded.'
-        )
-      }
-
-      if (
-        result.attachment.attachmentType !==
-        'image'
-      ) {
-        throw new Error(
-          'Only image attachments are enabled in this step.'
+            'The attachment could not be uploaded.'
         )
       }
 
@@ -1565,6 +1663,9 @@ function Chat() {
                     sizeBytes:
                       result.attachment!
                         .sizeBytes,
+                    attachmentType:
+                      result.attachment!
+                        .attachmentType,
                     status: 'ready',
                     error: undefined,
                   }
@@ -1575,7 +1676,7 @@ function Chat() {
       const uploadMessage =
         uploadError instanceof Error
           ? uploadError.message
-          : 'The image could not be uploaded.'
+          : 'The attachment could not be uploaded.'
 
       setPendingAttachments(
         (currentAttachments) =>
@@ -1596,7 +1697,7 @@ function Chat() {
     }
   }
 
-  function queueImageFiles(
+  function queueAttachmentFiles(
     selectedFiles: File[]
   ) {
     if (selectedFiles.length === 0) {
@@ -1609,7 +1710,7 @@ function Chat() {
 
     if (availableSlots <= 0) {
       setError(
-        `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} images to one message.`
+        `You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files to one message.`
       )
       return
     }
@@ -1626,37 +1727,51 @@ function Chat() {
       validationErrors.push(
         `Only ${availableSlots} more ${
           availableSlots === 1
-            ? 'image'
-            : 'images'
+            ? 'file'
+            : 'files'
         } can be attached.`
       )
     }
 
-    for (const file of filesWithinLimit) {
+    for (const originalFile of filesWithinLimit) {
       const mimeType =
-        file.type.trim().toLowerCase()
-
-      if (
-        !supportedImageMimeTypes.has(
-          mimeType
+        resolveAttachmentMimeType(
+          originalFile
         )
-      ) {
+
+      const attachmentType =
+        getAttachmentType(mimeType)
+
+      if (!attachmentType) {
         validationErrors.push(
-          `"${file.name}" is not a supported image. Use PNG, JPEG, WebP, or GIF.`
+          `"${originalFile.name}" is not supported. Use PNG, JPEG, WebP, GIF, PDF, DOCX, TXT, Markdown, CSV, or JSON.`
         )
         continue
       }
 
       if (
-        file.size <= 0 ||
-        file.size >
+        originalFile.size <= 0 ||
+        originalFile.size >
           MAX_ATTACHMENT_SIZE_BYTES
       ) {
         validationErrors.push(
-          `"${file.name}" must be smaller than 6 MB.`
+          `"${originalFile.name}" must be smaller than 6 MB.`
         )
         continue
       }
+
+      const file =
+        originalFile.type === mimeType
+          ? originalFile
+          : new File(
+              [originalFile],
+              originalFile.name,
+              {
+                type: mimeType,
+                lastModified:
+                  originalFile.lastModified,
+              }
+            )
 
       const previewUrl =
         URL.createObjectURL(file)
@@ -1671,6 +1786,7 @@ function Chat() {
         fileName: file.name,
         mimeType,
         sizeBytes: file.size,
+        attachmentType,
         previewUrl,
         status: 'uploading',
       }
@@ -1699,7 +1815,7 @@ function Chat() {
 
     event.target.value = ''
 
-    queueImageFiles(selectedFiles)
+    queueAttachmentFiles(selectedFiles)
   }
 
   function handleComposerPaste(
@@ -1747,7 +1863,7 @@ function Chat() {
         )
       })
 
-    queueImageFiles(pastedFiles)
+    queueAttachmentFiles(pastedFiles)
   }
 
   async function removePendingAttachment(
@@ -1755,7 +1871,7 @@ function Chat() {
   ) {
     if (attachment.status === 'uploading') {
       setError(
-        'Wait for the image upload to finish before removing it.'
+        'Wait for the attachment upload to finish before removing it.'
       )
       return
     }
@@ -1786,7 +1902,7 @@ function Chat() {
           !storagePath.trim()
         ) {
           throw new Error(
-            'The stored image path is invalid.'
+            'The stored attachment path is invalid.'
           )
         }
 
@@ -1836,7 +1952,7 @@ function Chat() {
       setError(
         removeError instanceof Error
           ? removeError.message
-          : 'The image could not be removed.'
+          : 'The attachment could not be removed.'
       )
     }
   }
@@ -1873,14 +1989,33 @@ function Chat() {
           attachment.id
       )
 
+    const selectedImageCount =
+      selectedAttachments.filter(
+        (attachment) =>
+          attachment.attachmentType === 'image'
+      ).length
+
+    const selectedDocumentCount =
+      selectedAttachments.filter(
+        (attachment) =>
+          attachment.attachmentType === 'document'
+      ).length
+
     const effectiveMessage =
       cleanedMessage ||
       (
-        selectedAttachments.length === 1
-          ? 'Please analyze this image.'
-          : selectedAttachments.length > 1
-            ? 'Please analyze these images.'
-            : ''
+        selectedImageCount > 0 &&
+        selectedDocumentCount > 0
+          ? 'Please analyze the attached files.'
+          : selectedDocumentCount === 1
+            ? 'Please analyze the attached document.'
+            : selectedDocumentCount > 1
+              ? 'Please analyze the attached documents.'
+              : selectedImageCount === 1
+                ? 'Please analyze this image.'
+                : selectedImageCount > 1
+                  ? 'Please analyze these images.'
+                  : ''
       )
 
     if (
@@ -1893,7 +2028,7 @@ function Chat() {
 
     if (attachmentUploadInProgress) {
       setError(
-        'Wait for all image uploads to finish before sending.'
+        'Wait for all attachment uploads to finish before sending.'
       )
       return
     }
@@ -1937,6 +2072,8 @@ function Chat() {
                   attachment.mimeType,
                 sizeBytes:
                   attachment.sizeBytes,
+                attachmentType:
+                  attachment.attachmentType,
                 previewUrl:
                   attachment.previewUrl,
               })
@@ -2256,7 +2393,7 @@ function Chat() {
 
     if (attachmentUploadInProgress) {
       setError(
-        'Wait for the image upload to finish before starting a new chat.'
+        'Wait for the attachment upload to finish before starting a new chat.'
       )
       return
     }
@@ -2309,7 +2446,7 @@ function Chat() {
   ) {
     if (attachmentUploadInProgress) {
       setError(
-        'Wait for the image upload to finish before opening another conversation.'
+        'Wait for the attachment upload to finish before opening another conversation.'
       )
       return
     }
@@ -2711,40 +2848,92 @@ function Chat() {
                           {chatMessage.attachments &&
                             chatMessage.attachments
                               .length > 0 && (
-                              <div className="mb-3 grid max-w-[520px] grid-cols-2 gap-2">
+                              <div className="mb-3 grid max-w-[560px] grid-cols-1 gap-2 sm:grid-cols-2">
                                 {chatMessage.attachments.map(
-                                  (attachment) => (
-                                    <div
-                                      key={
-                                        attachment.id
-                                      }
-                                      className="overflow-hidden rounded-xl border border-[#44423e] bg-[#242422]"
-                                    >
-                                      {attachment.previewUrl ? (
-                                        <img
-                                          src={
-                                            attachment.previewUrl
-                                          }
-                                          alt={
-                                            attachment.fileName
-                                          }
-                                          className="h-36 w-full object-cover"
-                                        />
-                                      ) : (
-                                        <div className="flex h-36 items-center justify-center px-3 text-center text-xs text-[#8f8981]">
+                                  (attachment) =>
+                                    attachment.attachmentType ===
+                                    'image' ? (
+                                      <div
+                                        key={
+                                          attachment.id
+                                        }
+                                        className="overflow-hidden rounded-xl border border-[#44423e] bg-[#242422]"
+                                      >
+                                        {attachment.previewUrl ? (
+                                          <img
+                                            src={
+                                              attachment.previewUrl
+                                            }
+                                            alt={
+                                              attachment.fileName
+                                            }
+                                            className="h-36 w-full object-cover"
+                                          />
+                                        ) : (
+                                          <div className="flex h-36 items-center justify-center px-3 text-center text-xs text-[#8f8981]">
+                                            {
+                                              attachment.fileName
+                                            }
+                                          </div>
+                                        )}
+
+                                        <div className="truncate px-3 py-2 text-[11px] text-[#aaa49c]">
                                           {
                                             attachment.fileName
                                           }
                                         </div>
-                                      )}
-
-                                      <div className="truncate px-3 py-2 text-[11px] text-[#aaa49c]">
-                                        {
-                                          attachment.fileName
-                                        }
                                       </div>
-                                    </div>
-                                  )
+                                    ) : (
+                                      <a
+                                        key={
+                                          attachment.id
+                                        }
+                                        href={
+                                          attachment.previewUrl ||
+                                          undefined
+                                        }
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className={[
+                                          'flex min-w-0 items-center gap-3 rounded-xl border border-[#44423e] bg-[#242422] px-3 py-3 text-left',
+                                          attachment.previewUrl
+                                            ? 'transition hover:bg-[#2b2b28]'
+                                            : 'cursor-default',
+                                        ].join(' ')}
+                                        onClick={(event) => {
+                                          if (
+                                            !attachment.previewUrl
+                                          ) {
+                                            event.preventDefault()
+                                          }
+                                        }}
+                                      >
+                                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#302f2c] text-[#d8d2c9]">
+                                          <Icon
+                                            name="file"
+                                            className="h-5 w-5"
+                                          />
+                                        </span>
+
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block truncate text-sm text-[#e7e1d8]">
+                                            {
+                                              attachment.fileName
+                                            }
+                                          </span>
+
+                                          <span className="mt-1 block text-[10px] uppercase tracking-[0.08em] text-[#817b73]">
+                                            {getDocumentLabel(
+                                              attachment.fileName
+                                            )}{' '}
+                                            ·{' '}
+                                            {formatFileSize(
+                                              attachment.sizeBytes
+                                            )}
+                                          </span>
+                                        </span>
+                                      </a>
+                                    )
                                 )}
                               </div>
                             )}
@@ -2862,7 +3051,7 @@ function Chat() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
+                  accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/csv,application/json,.pdf,.docx,.txt,.md,.markdown,.csv,.json"
                   multiple
                   className="hidden"
                   onChange={
@@ -2878,11 +3067,29 @@ function Chat() {
                           key={attachment.localId}
                           className="relative overflow-hidden rounded-xl border border-[#44423e] bg-[#232321]"
                         >
-                          <img
-                            src={attachment.previewUrl}
-                            alt={attachment.fileName}
-                            className="h-24 w-full object-cover"
-                          />
+                          {attachment.attachmentType ===
+                          'image' ? (
+                            <img
+                              src={attachment.previewUrl}
+                              alt={attachment.fileName}
+                              className="h-24 w-full object-cover"
+                            />
+                          ) : (
+                            <div className="flex h-24 items-center justify-center bg-[#292927] text-[#d8d2c9]">
+                              <div className="text-center">
+                                <Icon
+                                  name="file"
+                                  className="mx-auto h-7 w-7"
+                                />
+
+                                <p className="mt-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#9a948c]">
+                                  {getDocumentLabel(
+                                    attachment.fileName
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+                          )}
 
                           <button
                             type="button"
@@ -2921,7 +3128,10 @@ function Chat() {
                             >
                               {attachment.status ===
                               'uploading'
-                                ? 'Uploading...'
+                                ? attachment.attachmentType ===
+                                  'document'
+                                  ? 'Extracting text...'
+                                  : 'Uploading...'
                                 : attachment.status ===
                                     'error'
                                   ? attachment.error ||
@@ -2946,7 +3156,7 @@ function Chat() {
                   onPaste={handleComposerPaste}
                   placeholder={
                     pendingAttachments.length > 0
-                      ? 'Ask Claude about the attached images...'
+                      ? 'Ask Claude about the attached files...'
                       : `Message Claude ${selectedModelName}...`
                   }
                   rows={2}
@@ -2974,9 +3184,9 @@ function Chat() {
                       pendingAttachments.length >=
                         MAX_ATTACHMENTS_PER_MESSAGE
                     }
-                    title="Attach images"
+                    title="Attach files"
                     className="rounded-lg p-2 text-[#d8d2c9] transition hover:bg-[#363633] disabled:cursor-not-allowed disabled:opacity-40"
-                    aria-label="Attach images"
+                    aria-label="Attach files"
                   >
                     <Icon name="plus" />
                   </button>
