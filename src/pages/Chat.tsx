@@ -1,13 +1,21 @@
 import {
+  Children,
+  isValidElement,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+
+import ReactMarkdown, {
+  type Components,
+} from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 import {
   useLocation,
@@ -448,6 +456,280 @@ function formatFileSize(sizeBytes: number): string {
     sizeBytes /
     (1024 * 1024)
   ).toFixed(1)} MB`
+}
+
+
+function getReactNodeText(node: ReactNode): string {
+  if (
+    typeof node === 'string' ||
+    typeof node === 'number'
+  ) {
+    return String(node)
+  }
+
+  if (Array.isArray(node)) {
+    return node
+      .map((child) => getReactNodeText(child))
+      .join('')
+  }
+
+  if (isValidElement(node)) {
+    const elementProps = node.props as {
+      children?: ReactNode
+    }
+
+    return getReactNodeText(
+      elementProps.children
+    )
+  }
+
+  return ''
+}
+
+function getCodeLanguage(
+  children: ReactNode
+): string | null {
+  const child = Children.toArray(children)[0]
+
+  if (!isValidElement(child)) {
+    return null
+  }
+
+  const elementProps = child.props as {
+    className?: string
+  }
+
+  const match =
+    elementProps.className?.match(
+      /language-([a-zA-Z0-9_-]+)/
+    )
+
+  return match?.[1] ?? null
+}
+
+function MarkdownCodeBlock({
+  children,
+}: {
+  children: ReactNode
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const code = getReactNodeText(children)
+    .replace(/\n$/, '')
+
+  const language = getCodeLanguage(children)
+
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopied(true)
+
+      window.setTimeout(() => {
+        setCopied(false)
+      }, 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div className="my-4 overflow-hidden rounded-xl border border-[#44423e] bg-[#181817]">
+      <div className="flex min-h-10 items-center justify-between border-b border-[#393835] bg-[#222220] px-3">
+        <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#817b73]">
+          {language || 'Code'}
+        </span>
+
+        <button
+          type="button"
+          onClick={() => void copyCode()}
+          className="rounded-md px-2 py-1 text-[11px] text-[#aaa49c] transition hover:bg-[#333330] hover:text-[#eee9e1]"
+          aria-label="Copy code"
+          title="Copy code"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      <pre className="overflow-x-auto p-4 text-[13px] leading-6 text-[#e6e0d7]">
+        {children}
+      </pre>
+    </div>
+  )
+}
+
+const markdownComponents: Components = {
+  h1: ({ children }) => (
+    <h1 className="mb-3 mt-6 text-3xl font-semibold leading-tight text-[#f2eee7] first:mt-0">
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className="mb-3 mt-6 text-2xl font-semibold leading-tight text-[#f2eee7] first:mt-0">
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className="mb-2 mt-5 text-xl font-semibold leading-snug text-[#f2eee7] first:mt-0">
+      {children}
+    </h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className="mb-2 mt-4 text-lg font-semibold text-[#f2eee7] first:mt-0">
+      {children}
+    </h4>
+  ),
+  h5: ({ children }) => (
+    <h5 className="mb-2 mt-4 text-base font-semibold text-[#f2eee7] first:mt-0">
+      {children}
+    </h5>
+  ),
+  h6: ({ children }) => (
+    <h6 className="mb-2 mt-4 text-sm font-semibold uppercase tracking-[0.08em] text-[#cfc8bf] first:mt-0">
+      {children}
+    </h6>
+  ),
+  p: ({ children }) => (
+    <p className="my-3 text-[15px] leading-7 text-[#e7e1d8] first:mt-0 last:mb-0">
+      {children}
+    </p>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold text-[#fffaf1]">
+      {children}
+    </strong>
+  ),
+  em: ({ children }) => (
+    <em className="italic text-[#eee8df]">
+      {children}
+    </em>
+  ),
+  ul: ({ children }) => (
+    <ul className="my-3 list-disc space-y-1.5 pl-6 text-[15px] leading-7 text-[#e7e1d8]">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="my-3 list-decimal space-y-1.5 pl-6 text-[15px] leading-7 text-[#e7e1d8]">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => (
+    <li className="pl-1 marker:text-[#9b958d]">
+      {children}
+    </li>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="my-4 border-l-2 border-[#746b61] pl-4 text-[#cfc8bf]">
+      {children}
+    </blockquote>
+  ),
+  a: ({ href, title, children }) => (
+    <a
+      href={href}
+      title={title}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium text-[#e58b6a] underline decoration-[#8f5f4d] underline-offset-4 transition hover:text-[#f0a283]"
+    >
+      {children}
+    </a>
+  ),
+  hr: () => (
+    <hr className="my-6 border-0 border-t border-[#3d3b37]" />
+  ),
+  pre: ({ children }) => (
+    <MarkdownCodeBlock>
+      {children}
+    </MarkdownCodeBlock>
+  ),
+  code: ({ className, children }) => {
+    const isBlockCode =
+      Boolean(className) ||
+      getReactNodeText(children).includes(
+        '\n'
+      )
+
+    return (
+      <code
+        className={
+          isBlockCode
+            ? `${className ?? ''} bg-transparent font-mono text-inherit`
+            : 'rounded-md border border-[#45423e] bg-[#2b2a27] px-1.5 py-0.5 font-mono text-[0.9em] text-[#f0d9c7]'
+        }
+      >
+        {children}
+      </code>
+    )
+  },
+  table: ({ children }) => (
+    <div className="my-4 overflow-x-auto rounded-xl border border-[#44423e]">
+      <table className="min-w-full border-collapse text-left text-sm">
+        {children}
+      </table>
+    </div>
+  ),
+  thead: ({ children }) => (
+    <thead className="bg-[#292927] text-[#f1ece4]">
+      {children}
+    </thead>
+  ),
+  tbody: ({ children }) => (
+    <tbody className="divide-y divide-[#3b3935]">
+      {children}
+    </tbody>
+  ),
+  tr: ({ children }) => (
+    <tr className="divide-x divide-[#3b3935]">
+      {children}
+    </tr>
+  ),
+  th: ({ children }) => (
+    <th className="px-3 py-2.5 font-semibold">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="px-3 py-2.5 align-top text-[#ddd7ce]">
+      {children}
+    </td>
+  ),
+  del: ({ children }) => (
+    <del className="text-[#9c958c]">
+      {children}
+    </del>
+  ),
+}
+
+function MarkdownMessage({
+  content,
+}: {
+  content: string
+}) {
+  return (
+    <div className="min-w-0 break-words">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={markdownComponents}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function getImageExtension(
+  mimeType: string
+): string {
+  switch (mimeType) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/webp':
+      return 'webp'
+    case 'image/gif':
+      return 'gif'
+    default:
+      return 'png'
+  }
 }
 
 function Chat() {
@@ -1314,15 +1596,9 @@ function Chat() {
     }
   }
 
-  function handleAttachmentSelection(
-    event: ChangeEvent<HTMLInputElement>
+  function queueImageFiles(
+    selectedFiles: File[]
   ) {
-    const selectedFiles = Array.from(
-      event.target.files ?? []
-    )
-
-    event.target.value = ''
-
     if (selectedFiles.length === 0) {
       return
     }
@@ -1338,25 +1614,25 @@ function Chat() {
       return
     }
 
-    const acceptedFiles =
+    const filesWithinLimit =
       selectedFiles.slice(0, availableSlots)
+
+    const validationErrors: string[] = []
 
     if (
       selectedFiles.length >
       availableSlots
     ) {
-      setError(
+      validationErrors.push(
         `Only ${availableSlots} more ${
           availableSlots === 1
             ? 'image'
             : 'images'
         } can be attached.`
       )
-    } else {
-      setError(null)
     }
 
-    for (const file of acceptedFiles) {
+    for (const file of filesWithinLimit) {
       const mimeType =
         file.type.trim().toLowerCase()
 
@@ -1365,7 +1641,7 @@ function Chat() {
           mimeType
         )
       ) {
-        setError(
+        validationErrors.push(
           `"${file.name}" is not a supported image. Use PNG, JPEG, WebP, or GIF.`
         )
         continue
@@ -1376,7 +1652,7 @@ function Chat() {
         file.size >
           MAX_ATTACHMENT_SIZE_BYTES
       ) {
-        setError(
+        validationErrors.push(
           `"${file.name}" must be smaller than 6 MB.`
         )
         continue
@@ -1408,6 +1684,70 @@ function Chat() {
 
       void uploadAttachment(draft, file)
     }
+
+    setError(
+      validationErrors[0] ?? null
+    )
+  }
+
+  function handleAttachmentSelection(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const selectedFiles = Array.from(
+      event.target.files ?? []
+    )
+
+    event.target.value = ''
+
+    queueImageFiles(selectedFiles)
+  }
+
+  function handleComposerPaste(
+    event: ClipboardEvent<HTMLTextAreaElement>
+  ) {
+    const clipboardImages = Array.from(
+      event.clipboardData.items
+    )
+      .filter(
+        (item) =>
+          item.kind === 'file' &&
+          supportedImageMimeTypes.has(
+            item.type.trim().toLowerCase()
+          )
+      )
+      .map((item) => item.getAsFile())
+      .filter(
+        (file): file is File =>
+          file !== null
+      )
+
+    if (clipboardImages.length === 0) {
+      return
+    }
+
+    event.preventDefault()
+
+    const timestamp = Date.now()
+
+    const pastedFiles =
+      clipboardImages.map((file, index) => {
+        const mimeType =
+          file.type.trim().toLowerCase()
+
+        const extension =
+          getImageExtension(mimeType)
+
+        return new File(
+          [file],
+          `pasted-image-${timestamp}-${index + 1}.${extension}`,
+          {
+            type: mimeType,
+            lastModified: timestamp,
+          }
+        )
+      })
+
+    queueImageFiles(pastedFiles)
   }
 
   async function removePendingAttachment(
@@ -2410,7 +2750,6 @@ function Chat() {
                             )}
 
                           <div
-                            className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]"
                             aria-live={
                               chatMessage.id ===
                               streamingMessageId
@@ -2418,12 +2757,25 @@ function Chat() {
                                 : undefined
                             }
                           >
-                            {chatMessage.content}
+                            {chatMessage.role ===
+                            'assistant' ? (
+                              <MarkdownMessage
+                                content={
+                                  chatMessage.content
+                                }
+                              />
+                            ) : (
+                              <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]">
+                                {
+                                  chatMessage.content
+                                }
+                              </div>
+                            )}
 
                             {chatMessage.id ===
                               streamingMessageId && (
                               <span
-                                className="ml-0.5 inline-block animate-pulse text-[#df6b45]"
+                                className="mt-1 inline-block animate-pulse text-[#df6b45]"
                                 aria-hidden="true"
                               >
                                 ▍
@@ -2591,6 +2943,7 @@ function Chat() {
                     setMessage(event.target.value)
                   }
                   onKeyDown={handleKeyDown}
+                  onPaste={handleComposerPaste}
                   placeholder={
                     pendingAttachments.length > 0
                       ? 'Ask Claude about the attached images...'
