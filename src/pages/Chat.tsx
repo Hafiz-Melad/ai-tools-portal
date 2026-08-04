@@ -39,6 +39,20 @@ type AIModel = {
   enabled: boolean
 }
 
+type ResponseMode =
+  | 'chat'
+  | 'web_search'
+  | 'research'
+
+type SearchSource = {
+  id: number | null
+  title: string
+  url: string
+  snippet: string | null
+  date: string | null
+  lastUpdated: string | null
+}
+
 type MessageAttachment = {
   id: string
   fileName: string
@@ -59,6 +73,8 @@ type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
   attachments?: MessageAttachment[]
+  responseMode?: ResponseMode
+  sources?: SearchSource[]
 }
 
 type AttachmentUploadResponse = {
@@ -104,10 +120,16 @@ type ChatStreamEvent =
         provider: string
         modelKey: string
       }
+      responseMode?: ResponseMode
     }
   | {
       type: 'delta'
       delta: string
+    }
+  | {
+      type: 'sources'
+      responseMode: ResponseMode
+      sources: SearchSource[]
     }
   | {
       type: 'complete'
@@ -116,6 +138,8 @@ type ChatStreamEvent =
       creditsRemaining: number
       creditsUsed: number
       providerCostUsd: number
+      responseMode: ResponseMode
+      sources: SearchSource[]
     }
   | {
       type: 'error'
@@ -139,6 +163,8 @@ type HistoryMessage = {
   role: string
   content: string
   created_at: string
+  response_mode?: unknown
+  sources?: unknown
 }
 
 type HistoryApiResponse = {
@@ -751,18 +777,321 @@ const markdownComponents: Components = {
   ),
 }
 
+function normalizeResponseMode(
+  value: unknown
+): ResponseMode {
+  return value === 'web_search' ||
+    value === 'research'
+    ? value
+    : 'chat'
+}
+
+function normalizeSearchSources(
+  value: unknown
+): SearchSource[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  const sources: SearchSource[] = []
+
+  for (const item of value) {
+    if (
+      !item ||
+      typeof item !== 'object'
+    ) {
+      continue
+    }
+
+    const raw =
+      item as Record<string, unknown>
+
+    if (
+      typeof raw.url !== 'string' ||
+      !raw.url.trim()
+    ) {
+      continue
+    }
+
+    let parsedUrl: URL
+
+    try {
+      parsedUrl = new URL(raw.url)
+    } catch {
+      continue
+    }
+
+    if (
+      parsedUrl.protocol !== 'https:' &&
+      parsedUrl.protocol !== 'http:'
+    ) {
+      continue
+    }
+
+    let id: number | null = null
+
+    if (
+      typeof raw.id === 'number' &&
+      Number.isInteger(raw.id) &&
+      raw.id > 0
+    ) {
+      id = raw.id
+    } else if (
+      typeof raw.id === 'string' &&
+      /^\d+$/.test(raw.id.trim())
+    ) {
+      const parsedId = Number(raw.id)
+
+      if (
+        Number.isSafeInteger(parsedId) &&
+        parsedId > 0
+      ) {
+        id = parsedId
+      }
+    }
+
+    const title =
+      typeof raw.title === 'string' &&
+      raw.title.trim()
+        ? raw.title.trim().slice(0, 300)
+        : parsedUrl.hostname
+
+    const optionalText = (
+      candidate: unknown,
+      maximumLength: number
+    ): string | null =>
+      typeof candidate === 'string' &&
+      candidate.trim()
+        ? candidate
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, maximumLength)
+        : null
+
+    const normalized: SearchSource = {
+      id,
+      title,
+      url: parsedUrl.toString(),
+      snippet: optionalText(
+        raw.snippet,
+        1000
+      ),
+      date: optionalText(
+        raw.date,
+        80
+      ),
+      lastUpdated: optionalText(
+        raw.lastUpdated ??
+          raw.last_updated,
+        80
+      ),
+    }
+
+    const existingIndex =
+      sources.findIndex(
+        (source) =>
+          (
+            normalized.id !== null &&
+            source.id === normalized.id
+          ) ||
+          source.url === normalized.url
+      )
+
+    if (existingIndex < 0) {
+      if (sources.length < 100) {
+        sources.push(normalized)
+      }
+    } else {
+      sources[existingIndex] = normalized
+    }
+  }
+
+  return sources
+}
+
+function getResponseModeLabel(
+  responseMode: ResponseMode
+): string {
+  if (responseMode === 'web_search') {
+    return 'Web Search'
+  }
+
+  if (responseMode === 'research') {
+    return 'Research'
+  }
+
+  return 'Chat'
+}
+
+function escapeMarkdownUrl(
+  value: string
+): string {
+  return value
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+}
+
+function linkifyCitationReferences(
+  content: string,
+  sources: SearchSource[]
+): string {
+  if (sources.length === 0) {
+    return content
+  }
+
+  const sourceById = new Map(
+    sources
+      .filter(
+        (
+          source
+        ): source is SearchSource & {
+          id: number
+        } => source.id !== null
+      )
+      .map((source) => [
+        source.id,
+        source,
+      ])
+  )
+
+  if (sourceById.size === 0) {
+    return content
+  }
+
+  const fencedParts =
+    content.split(/(```[\s\S]*?```)/g)
+
+  return fencedParts
+    .map((fencedPart, fencedIndex) => {
+      if (fencedIndex % 2 === 1) {
+        return fencedPart
+      }
+
+      const inlineParts =
+        fencedPart.split(/(`[^`\n]*`)/g)
+
+      return inlineParts
+        .map((inlinePart, inlineIndex) => {
+          if (inlineIndex % 2 === 1) {
+            return inlinePart
+          }
+
+          return inlinePart.replace(
+            /(^|[^\[])\[(\d+)\](?![\]\(])/g,
+            (
+              _match,
+              prefix: string,
+              rawId: string
+            ) => {
+              const source =
+                sourceById.get(
+                  Number(rawId)
+                )
+
+              if (!source) {
+                return `${prefix}[${rawId}]`
+              }
+
+              return (
+                `${prefix}[[${rawId}]](` +
+                `${escapeMarkdownUrl(source.url)})`
+              )
+            }
+          )
+        })
+        .join('')
+    })
+    .join('')
+}
+
+function SourceList({
+  sources,
+}: {
+  sources: SearchSource[]
+}) {
+  if (sources.length === 0) {
+    return null
+  }
+
+  return (
+    <details
+      className="mt-4 rounded-xl border border-[#403e3a] bg-[#242422]"
+      open={sources.length <= 3}
+    >
+      <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-[#cfc8bf]">
+        {sources.length}{' '}
+        {sources.length === 1
+          ? 'source'
+          : 'sources'}
+      </summary>
+
+      <div className="grid gap-2 border-t border-[#3b3935] p-2 sm:grid-cols-2">
+        {sources.map((source, index) => {
+          let host = source.url
+
+          try {
+            host = new URL(
+              source.url
+            ).hostname.replace(/^www\./, '')
+          } catch {
+            // The URL was normalized before rendering.
+          }
+
+          return (
+            <a
+              key={`${source.id ?? 'source'}-${source.url}-${index}`}
+              href={source.url}
+              target="_blank"
+              rel="noreferrer"
+              className="min-w-0 rounded-lg border border-[#3d3b37] bg-[#292927] px-3 py-2 transition hover:border-[#5a554e] hover:bg-[#302f2c]"
+            >
+              <span className="block truncate text-xs font-medium text-[#eee9e1]">
+                {source.id !== null
+                  ? `[${source.id}] `
+                  : ''}
+                {source.title}
+              </span>
+
+              <span className="mt-1 block truncate text-[10px] text-[#8f8981]">
+                {host}
+                {source.date
+                  ? ` · ${source.date}`
+                  : ''}
+              </span>
+
+              {source.snippet && (
+                <span className="mt-1 line-clamp-2 block text-[11px] leading-4 text-[#aaa49c]">
+                  {source.snippet}
+                </span>
+              )}
+            </a>
+          )
+        })}
+      </div>
+    </details>
+  )
+}
+
 function MarkdownMessage({
   content,
+  sources = [],
 }: {
   content: string
+  sources?: SearchSource[]
 }) {
+  const renderedContent =
+    linkifyCitationReferences(
+      content,
+      sources
+    )
+
   return (
     <div className="min-w-0 break-words">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={markdownComponents}
       >
-        {content}
+        {renderedContent}
       </ReactMarkdown>
     </div>
   )
@@ -1071,6 +1400,12 @@ function Chat() {
   const pendingPromptRef =
     useRef<string | null>(null)
 
+  const generationAbortControllerRef =
+    useRef<AbortController | null>(null)
+
+  const generationStoppedRef =
+    useRef(false)
+
   const [profile, setProfile] =
     useState<Profile | null>(null)
 
@@ -1087,6 +1422,9 @@ function Chat() {
     useState<HistoryConversation[]>([])
 
   const [message, setMessage] = useState('')
+
+  const [responseMode, setResponseMode] =
+    useState<ResponseMode>('chat')
 
   const [
     pendingAttachments,
@@ -1187,6 +1525,10 @@ function Chat() {
 
   useEffect(() => {
     return () => {
+      generationStoppedRef.current = true
+      generationAbortControllerRef.current?.abort()
+      generationAbortControllerRef.current = null
+
       for (
         const previewUrl of
         objectPreviewUrlsRef.current
@@ -1521,14 +1863,111 @@ function Chat() {
                 savedMessage.role === 'user' ||
                 savedMessage.role === 'assistant'
             )
-            .map((savedMessage) => ({
-              id: savedMessage.id,
-              role:
+            .map((savedMessage) => {
+              const role =
                 savedMessage.role as
                   | 'user'
-                  | 'assistant',
-              content: savedMessage.content,
-            }))
+                  | 'assistant'
+
+              return {
+                id: savedMessage.id,
+                role,
+                content: savedMessage.content,
+                responseMode:
+                  role === 'assistant'
+                    ? normalizeResponseMode(
+                        savedMessage.response_mode
+                      )
+                    : undefined,
+                sources:
+                  role === 'assistant'
+                    ? normalizeSearchSources(
+                        savedMessage.sources
+                      )
+                    : undefined,
+              }
+            })
+
+        try {
+          const assistantMessageIds =
+            restoredMessages
+              .filter(
+                (savedMessage) =>
+                  savedMessage.role ===
+                  'assistant'
+              )
+              .map(
+                (savedMessage) =>
+                  savedMessage.id
+              )
+
+          if (
+            assistantMessageIds.length > 0
+          ) {
+            const {
+              data: metadataRows,
+              error: metadataError,
+            } = await supabase
+              .from('messages')
+              .select(
+                'id, response_mode, sources'
+              )
+              .in(
+                'id',
+                assistantMessageIds
+              )
+
+            if (!metadataError) {
+              const metadataById =
+                new Map(
+                  (
+                    metadataRows ?? []
+                  ).map((row) => [
+                    row.id as string,
+                    row,
+                  ])
+                )
+
+              restoredMessages =
+                restoredMessages.map(
+                  (savedMessage) => {
+                    if (
+                      savedMessage.role !==
+                      'assistant'
+                    ) {
+                      return savedMessage
+                    }
+
+                    const metadata =
+                      metadataById.get(
+                        savedMessage.id
+                      )
+
+                    if (!metadata) {
+                      return savedMessage
+                    }
+
+                    return {
+                      ...savedMessage,
+                      responseMode:
+                        normalizeResponseMode(
+                          metadata.response_mode
+                        ),
+                      sources:
+                        normalizeSearchSources(
+                          metadata.sources
+                        ),
+                    }
+                  }
+                )
+            }
+          }
+        } catch (metadataLoadError) {
+          console.error(
+            'Could not load response metadata:',
+            metadataLoadError
+          )
+        }
 
         try {
           const messageIds = restoredMessages.map(
@@ -1666,6 +2105,21 @@ function Chat() {
         )
 
         setMessages(restoredMessages)
+
+        const latestAssistantMode =
+          [...restoredMessages]
+            .reverse()
+            .find(
+              (savedMessage) =>
+                savedMessage.role ===
+                'assistant'
+            )?.responseMode
+
+        if (latestAssistantMode) {
+          setResponseMode(
+            latestAssistantMode
+          )
+        }
 
         if (storedModel) {
           setActiveModelId(storedModel.id)
@@ -2274,9 +2728,19 @@ function Chat() {
      * behavior deterministic.
      */
     const selectedModel = activeModel
+    const selectedResponseMode =
+      responseMode
     const assistantMessageId = crypto.randomUUID()
+    const generationAbortController =
+      new AbortController()
+
+    generationAbortControllerRef.current =
+      generationAbortController
+    generationStoppedRef.current = false
 
     let assistantStarted = false
+    let pendingStreamSources:
+      SearchSource[] = []
 
     setError(null)
     setSending(true)
@@ -2347,7 +2811,11 @@ function Chat() {
               selectedAttachments.map(
                 (attachment) => attachment.id
               ),
+            responseMode:
+              selectedResponseMode,
           }),
+          signal:
+            generationAbortController.signal,
         }
       )
 
@@ -2398,6 +2866,36 @@ function Chat() {
       function applyStreamEvent(
         event: ChatStreamEvent
       ) {
+        if (event.type === 'sources') {
+          pendingStreamSources =
+            normalizeSearchSources(
+              event.sources
+            )
+
+          if (assistantStarted) {
+            setMessages(
+              (currentMessages) =>
+                currentMessages.map(
+                  (chatMessage) =>
+                    chatMessage.id ===
+                    assistantMessageId
+                      ? {
+                          ...chatMessage,
+                          responseMode:
+                            normalizeResponseMode(
+                              event.responseMode
+                            ),
+                          sources:
+                            pendingStreamSources,
+                        }
+                      : chatMessage
+                )
+            )
+          }
+
+          return
+        }
+
         if (event.type === 'delta') {
           if (!event.delta) {
             return
@@ -2416,6 +2914,10 @@ function Chat() {
                 id: assistantMessageId,
                 role: 'assistant',
                 content: event.delta,
+                responseMode:
+                  selectedResponseMode,
+                sources:
+                  pendingStreamSources,
               },
             ])
 
@@ -2442,6 +2944,31 @@ function Chat() {
 
         if (event.type === 'complete') {
           streamResult.completion = event
+
+          const completedSources =
+            normalizeSearchSources(
+              event.sources
+            )
+
+          setMessages(
+            (currentMessages) =>
+              currentMessages.map(
+                (chatMessage) =>
+                  chatMessage.id ===
+                  assistantMessageId
+                    ? {
+                        ...chatMessage,
+                        responseMode:
+                          normalizeResponseMode(
+                            event.responseMode
+                          ),
+                        sources:
+                          completedSources,
+                      }
+                    : chatMessage
+              )
+          )
+
           return
         }
 
@@ -2562,6 +3089,35 @@ function Chat() {
         session.access_token
       )
     } catch (err) {
+      const generationWasStopped =
+        generationStoppedRef.current ||
+        (
+          err instanceof DOMException &&
+          err.name === 'AbortError'
+        )
+
+      if (generationWasStopped) {
+        setError(null)
+
+        /*
+         * Keep partial streamed text visible. When generation was
+         * stopped before Claude produced any text, remove the
+         * optimistic user message and restore the prompt.
+         */
+        if (!assistantStarted) {
+          setMessages((currentMessages) =>
+            currentMessages.filter(
+              (chatMessage) =>
+                chatMessage.id !== userMessage.id
+            )
+          )
+
+          setMessage(cleanedMessage)
+        }
+
+        return
+      }
+
       console.error(err)
 
       const errorMessage =
@@ -2587,11 +3143,27 @@ function Chat() {
         setMessage(cleanedMessage)
       }
     } finally {
+      if (
+        generationAbortControllerRef.current ===
+        generationAbortController
+      ) {
+        generationAbortControllerRef.current = null
+      }
+
+      generationStoppedRef.current = false
       setStreamingMessageId(null)
       setSending(false)
     }
   }
 
+  function stopGeneration() {
+    if (!sending) {
+      return
+    }
+
+    generationStoppedRef.current = true
+    generationAbortControllerRef.current?.abort()
+  }
 
   function sendMessage(event?: FormEvent) {
     event?.preventDefault()
@@ -3174,11 +3746,33 @@ function Chat() {
                           >
                             {chatMessage.role ===
                             'assistant' ? (
-                              <MarkdownMessage
-                                content={
-                                  chatMessage.content
-                                }
-                              />
+                              <>
+                                {chatMessage.responseMode &&
+                                  chatMessage.responseMode !==
+                                    'chat' && (
+                                  <div className="mb-2 inline-flex rounded-full border border-[#4a4741] bg-[#292927] px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-[#bdb6ad]">
+                                    {getResponseModeLabel(
+                                      chatMessage.responseMode
+                                    )}
+                                  </div>
+                                )}
+
+                                <MarkdownMessage
+                                  content={
+                                    chatMessage.content
+                                  }
+                                  sources={
+                                    chatMessage.sources
+                                  }
+                                />
+
+                                <SourceList
+                                  sources={
+                                    chatMessage.sources ??
+                                    []
+                                  }
+                                />
+                              </>
                             ) : (
                               <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-[#e7e1d8]">
                                 {
@@ -3241,8 +3835,13 @@ function Chat() {
                         </div>
 
                         <div className="pt-1 text-sm text-[#8f8981]">
-                          Claude {selectedModelName} is
-                          thinking
+                          Claude {selectedModelName} is{' '}
+                          {responseMode === 'research'
+                            ? 'researching'
+                            : responseMode ===
+                                'web_search'
+                              ? 'searching the web'
+                              : 'thinking'}
                           <span className="animate-pulse">
                             ...
                           </span>
@@ -3383,7 +3982,11 @@ function Chat() {
                   placeholder={
                     pendingAttachments.length > 0
                       ? 'Ask Claude about the attached files...'
-                      : `Message Claude ${selectedModelName}...`
+                      : responseMode === 'research'
+                        ? 'Ask Claude to research a topic...'
+                        : responseMode === 'web_search'
+                          ? 'Ask Claude to search the web...'
+                          : `Message Claude ${selectedModelName}...`
                   }
                   rows={2}
                   maxLength={10000}
@@ -3449,14 +4052,44 @@ function Chat() {
                       )}
                     </select>
 
-                    <button
-                      type="button"
-                      disabled
-                      title="Reasoning controls are coming next"
-                      className="rounded-lg px-2 py-2 text-xs text-[#9b958d]"
+                    <select
+                      value={responseMode}
+                      onChange={(event) =>
+                        setResponseMode(
+                          normalizeResponseMode(
+                            event.target.value
+                          )
+                        )
+                      }
+                      disabled={
+                        sending ||
+                        bootstrapLoading ||
+                        conversationLoading ||
+                        !canSendMessages
+                      }
+                      title="Response mode"
+                      aria-label="Response mode"
+                      className="max-w-[125px] cursor-pointer appearance-none rounded-lg bg-[#333330] px-2.5 py-2 text-xs font-medium text-[#d8d2c9] outline-none transition hover:bg-[#3a3935] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Medium⌄
-                    </button>
+                      <option
+                        value="chat"
+                        className="bg-[#2a2a28]"
+                      >
+                        Chat
+                      </option>
+                      <option
+                        value="web_search"
+                        className="bg-[#2a2a28]"
+                      >
+                        Web Search
+                      </option>
+                      <option
+                        value="research"
+                        className="bg-[#2a2a28]"
+                      >
+                        Research
+                      </option>
+                    </select>
 
                     <button
                       type="button"
@@ -3467,7 +4100,17 @@ function Chat() {
                       <Icon name="mic" />
                     </button>
 
-                    {message.trim() ||
+                    {sending ? (
+                      <button
+                        type="button"
+                        onClick={stopGeneration}
+                        className="flex h-8 w-8 items-center justify-center rounded-full bg-[#eee9e1] text-[#272624] transition hover:bg-white"
+                        aria-label="Stop generating"
+                        title="Stop generating"
+                      >
+                        <span className="h-3 w-3 rounded-[2px] bg-[#272624]" />
+                      </button>
+                    ) : message.trim() ||
                     readyAttachments.length > 0 ? (
                       <button
                         type="submit"

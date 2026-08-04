@@ -12,11 +12,17 @@ type FunctionContext = {
   waitUntil: (promise: Promise<unknown>) => void
 }
 
+type ResponseMode =
+  | 'chat'
+  | 'web_search'
+  | 'research'
+
 type ChatRequest = {
   modelId?: string
   message?: string
   conversationId?: string | null
   attachmentIds?: unknown
+  responseMode?: unknown
 }
 
 type CreditResult = {
@@ -84,6 +90,15 @@ type AgentInputMessage = {
   content: string | AgentInputContent[]
 }
 
+type AgentTool =
+  | {
+      type: 'web_search'
+      search_context_size?: 'low' | 'medium' | 'high'
+    }
+  | {
+      type: 'fetch_url'
+    }
+
 type AgentRequestBody = {
   model: string
   input: string | AgentInputMessage[]
@@ -91,6 +106,10 @@ type AgentRequestBody = {
   stream: boolean
   store: boolean
   previous_response_id?: string
+  preset?: 'high'
+  instructions?: string
+  tools?: AgentTool[]
+  max_steps?: number
 }
 
 type AgentUsage = {
@@ -108,16 +127,28 @@ type AgentUsage = {
   }
 }
 
+type SearchSource = {
+  id: number | null
+  title: string
+  url: string
+  snippet: string | null
+  date: string | null
+  lastUpdated: string | null
+}
+
+type AgentOutputItem = {
+  type?: string
+  content?: Array<{
+    type?: string
+    text?: string
+  }>
+  results?: unknown
+}
+
 type AgentResponse = {
   id?: string
   model?: string
-  output?: Array<{
-    type?: string
-    content?: Array<{
-      type?: string
-      text?: string
-    }>
-  }>
+  output?: AgentOutputItem[]
   usage?: AgentUsage
   error?: {
     message?: string
@@ -127,6 +158,7 @@ type AgentResponse = {
 type AgentStreamEvent = {
   type?: string
   delta?: string
+  results?: unknown
   response?: AgentResponse
   error?: {
     message?: string
@@ -141,6 +173,7 @@ type StreamStartEvent = {
     provider: string
     modelKey: string
   }
+  responseMode: ResponseMode
   modelSwitched: boolean
   continuityMethod:
     | 'provider_response'
@@ -151,6 +184,12 @@ type StreamStartEvent = {
 type StreamDeltaEvent = {
   type: 'delta'
   delta: string
+}
+
+type StreamSourcesEvent = {
+  type: 'sources'
+  responseMode: ResponseMode
+  sources: SearchSource[]
 }
 
 type StreamCompleteEvent = {
@@ -166,6 +205,8 @@ type StreamCompleteEvent = {
   providerCostUsd: number
   creditsUsed: number
   creditsRemaining: number
+  responseMode: ResponseMode
+  sources: SearchSource[]
 }
 
 type StreamErrorEvent = {
@@ -176,8 +217,16 @@ type StreamErrorEvent = {
 type ClientStreamEvent =
   | StreamStartEvent
   | StreamDeltaEvent
+  | StreamSourcesEvent
   | StreamCompleteEvent
   | StreamErrorEvent
+
+class ClientGenerationStoppedError extends Error {
+  constructor() {
+    super('The client stopped generation.')
+    this.name = 'ClientGenerationStoppedError'
+  }
+}
 
 const allowedOrigins = [
   'http://localhost:5173',
@@ -213,6 +262,12 @@ const supportedDocumentMimeTypes = new Set([
   'text/csv',
   'application/json',
 ])
+
+const WEB_SEARCH_INSTRUCTIONS =
+  'You are Claude in an independent AI workspace. Search the web before answering. Use fetch_url when a specific page needs closer reading. Cite every web-grounded factual claim inline using numbered references such as [1] that match the returned search-result IDs. Never invent a citation. Prefer primary and authoritative sources, distinguish current facts from inference, and state clearly when reliable search evidence is unavailable. Do not add a separate bibliography because the interface displays source cards.'
+
+const RESEARCH_INSTRUCTIONS =
+  'You are Claude in an independent AI workspace. Conduct rigorous multi-step web research before answering. Break the question into useful research subproblems, search broadly, fetch the most relevant primary sources, cross-check important claims, and synthesize a structured answer. Cite every source-grounded factual claim inline using numbered references such as [1] that match the returned search-result IDs. Never invent citations. Explicitly identify uncertainty, disagreement, or missing evidence. Do not add a separate bibliography because the interface displays source cards.'
 
 function requireEnv(
   value: string | undefined,
@@ -297,6 +352,250 @@ function normalizeAttachmentIds(
     attachmentIds,
     error: null,
   }
+}
+
+function normalizeResponseMode(
+  value: unknown
+): {
+  responseMode: ResponseMode | null
+  error: string | null
+} {
+  if (value === undefined || value === null) {
+    return {
+      responseMode: 'chat',
+      error: null,
+    }
+  }
+
+  if (typeof value !== 'string') {
+    return {
+      responseMode: null,
+      error: 'The response mode has an invalid format.',
+    }
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+
+  if (
+    normalized === 'chat' ||
+    normalized === 'web_search' ||
+    normalized === 'research'
+  ) {
+    return {
+      responseMode: normalized,
+      error: null,
+    }
+  }
+
+  return {
+    responseMode: null,
+    error: 'The selected response mode is invalid.',
+  }
+}
+
+function normalizeOptionalText(
+  value: unknown,
+  maximumLength: number
+): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maximumLength)
+
+  return normalized || null
+}
+
+function normalizeSearchSource(
+  value: unknown
+): SearchSource | null {
+  if (
+    !value ||
+    typeof value !== 'object'
+  ) {
+    return null
+  }
+
+  const raw = value as Record<string, unknown>
+
+  const rawUrl = normalizeOptionalText(
+    raw.url,
+    2048
+  )
+
+  if (!rawUrl) {
+    return null
+  }
+
+  let parsedUrl: URL
+
+  try {
+    parsedUrl = new URL(rawUrl)
+  } catch {
+    return null
+  }
+
+  if (
+    parsedUrl.protocol !== 'https:' &&
+    parsedUrl.protocol !== 'http:'
+  ) {
+    return null
+  }
+
+  let id: number | null = null
+
+  if (
+    typeof raw.id === 'number' &&
+    Number.isInteger(raw.id) &&
+    raw.id > 0
+  ) {
+    id = raw.id
+  } else if (
+    typeof raw.id === 'string' &&
+    /^\d+$/.test(raw.id.trim())
+  ) {
+    const parsedId = Number(raw.id.trim())
+
+    if (
+      Number.isSafeInteger(parsedId) &&
+      parsedId > 0
+    ) {
+      id = parsedId
+    }
+  }
+
+  const title =
+    normalizeOptionalText(raw.title, 300) ??
+    parsedUrl.hostname
+
+  return {
+    id,
+    title,
+    url: parsedUrl.toString(),
+    snippet: normalizeOptionalText(
+      raw.snippet,
+      1000
+    ),
+    date: normalizeOptionalText(
+      raw.date,
+      80
+    ),
+    lastUpdated: normalizeOptionalText(
+      raw.last_updated ??
+        raw.lastUpdated,
+      80
+    ),
+  }
+}
+
+function mergeSearchSources(
+  currentSources: SearchSource[],
+  rawResults: unknown
+): {
+  sources: SearchSource[]
+  changed: boolean
+} {
+  if (!Array.isArray(rawResults)) {
+    return {
+      sources: currentSources,
+      changed: false,
+    }
+  }
+
+  const nextSources = [...currentSources]
+  let changed = false
+
+  for (const rawResult of rawResults) {
+    const normalized =
+      normalizeSearchSource(rawResult)
+
+    if (!normalized) {
+      continue
+    }
+
+    const existingIndex =
+      nextSources.findIndex(
+        (candidate) =>
+          (
+            normalized.id !== null &&
+            candidate.id === normalized.id
+          ) ||
+          candidate.url === normalized.url
+      )
+
+    if (existingIndex < 0) {
+      if (nextSources.length < 100) {
+        nextSources.push(normalized)
+        changed = true
+      }
+
+      continue
+    }
+
+    const existing =
+      nextSources[existingIndex]
+
+    const merged: SearchSource = {
+      id:
+        existing.id ??
+        normalized.id,
+      title:
+        normalized.title ||
+        existing.title,
+      url: normalized.url,
+      snippet:
+        normalized.snippet ??
+        existing.snippet,
+      date:
+        normalized.date ??
+        existing.date,
+      lastUpdated:
+        normalized.lastUpdated ??
+        existing.lastUpdated,
+    }
+
+    if (
+      JSON.stringify(existing) !==
+      JSON.stringify(merged)
+    ) {
+      nextSources[existingIndex] = merged
+      changed = true
+    }
+  }
+
+  return {
+    sources: nextSources,
+    changed,
+  }
+}
+
+function extractResponseSearchResults(
+  response: AgentResponse | null
+): unknown[] {
+  if (!response) {
+    return []
+  }
+
+  const resultBatches: unknown[] = []
+
+  for (const outputItem of response.output ?? []) {
+    if (
+      outputItem.type === 'search_results' &&
+      Array.isArray(outputItem.results)
+    ) {
+      resultBatches.push(
+        ...outputItem.results
+      )
+    }
+  }
+
+  return resultBatches
 }
 
 function getCorsHeaders(
@@ -652,6 +951,34 @@ export async function onRequestPost(
     } = normalizeAttachmentIds(
       requestBody.attachmentIds
     )
+
+    const {
+      responseMode,
+      error: responseModeError,
+    } = normalizeResponseMode(
+      requestBody.responseMode
+    )
+
+    if (responseModeError || !responseMode) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            responseModeError ||
+            'The selected response mode is invalid.',
+        },
+        400
+      )
+    }
+
+    /*
+     * Capture the validated mode as a non-null primitive.
+     * TypeScript does not preserve the earlier narrowing inside
+     * the nested asynchronous stream processor.
+     */
+    const resolvedResponseMode: ResponseMode =
+      responseMode
 
     if (attachmentIdError) {
       return jsonResponse(
@@ -1298,9 +1625,34 @@ export async function onRequestPost(
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
       input: agentInput,
-      max_output_tokens: 600,
+      max_output_tokens:
+        resolvedResponseMode === 'research'
+          ? 4000
+          : resolvedResponseMode === 'web_search'
+            ? 1800
+            : 600,
       stream: true,
       store: false,
+    }
+
+    if (resolvedResponseMode === 'web_search') {
+      agentRequestBody.instructions =
+        WEB_SEARCH_INSTRUCTIONS
+
+      agentRequestBody.tools = [
+        {
+          type: 'web_search',
+          search_context_size: 'medium',
+        },
+        {
+          type: 'fetch_url',
+        },
+      ]
+    } else if (resolvedResponseMode === 'research') {
+      agentRequestBody.preset = 'high'
+      agentRequestBody.instructions =
+        RESEARCH_INSTRUCTIONS
+      agentRequestBody.max_steps = 10
     }
 
     if (previousResponseId) {
@@ -1380,12 +1732,29 @@ export async function onRequestPost(
     const encoder = new TextEncoder()
 
     let clientStreamOpen = true
+    let clientGenerationStopped = false
+
+    let providerReader:
+      | ReadableStreamDefaultReader<Uint8Array>
+      | null = null
+
+    void writer.closed.catch(() => {
+      clientGenerationStopped = true
+      clientStreamOpen = false
+
+      void providerReader?.cancel(
+        'The client stopped generation.'
+      )
+    })
 
     async function sendClientEvent(
       event: ClientStreamEvent
     ): Promise<void> {
-      if (!clientStreamOpen) {
-        return
+      if (
+        !clientStreamOpen ||
+        clientGenerationStopped
+      ) {
+        throw new ClientGenerationStoppedError()
       }
 
       try {
@@ -1393,11 +1762,14 @@ export async function onRequestPost(
           encoder.encode(`${JSON.stringify(event)}\n`)
         )
       } catch {
-        /*
-         * The browser may close the page or cancel the request.
-         * Continue processing so billing and history stay consistent.
-         */
+        clientGenerationStopped = true
         clientStreamOpen = false
+
+        void providerReader?.cancel(
+          'The client stopped generation.'
+        )
+
+        throw new ClientGenerationStoppedError()
       }
     }
 
@@ -1416,9 +1788,12 @@ export async function onRequestPost(
     async function processProviderStream(): Promise<void> {
       let reply = ''
       let completedResponse: AgentResponse | null = null
+      let searchSources: SearchSource[] = []
       let sseBuffer = ''
 
       const reader = perplexityResponse.body!.getReader()
+      providerReader = reader
+
       const decoder = new TextDecoder()
 
       try {
@@ -1430,6 +1805,7 @@ export async function onRequestPost(
             provider: resolvedModel.provider,
             modelKey: resolvedModel.model_key,
           },
+          responseMode: resolvedResponseMode,
           modelSwitched,
           continuityMethod,
         })
@@ -1472,6 +1848,28 @@ export async function onRequestPost(
 
             if (
               event.type ===
+                'response.reasoning.search_results'
+            ) {
+              const mergedSources =
+                mergeSearchSources(
+                  searchSources,
+                  event.results
+                )
+
+              if (mergedSources.changed) {
+                searchSources =
+                  mergedSources.sources
+
+                await sendClientEvent({
+                  type: 'sources',
+                  responseMode: resolvedResponseMode,
+                  sources: searchSources,
+                })
+              }
+            }
+
+            if (
+              event.type ===
                 'response.output_text.delta' &&
               typeof event.delta === 'string' &&
               event.delta
@@ -1489,6 +1887,25 @@ export async function onRequestPost(
               event.response
             ) {
               completedResponse = event.response
+
+              const mergedSources =
+                mergeSearchSources(
+                  searchSources,
+                  extractResponseSearchResults(
+                    event.response
+                  )
+                )
+
+              if (mergedSources.changed) {
+                searchSources =
+                  mergedSources.sources
+
+                await sendClientEvent({
+                  type: 'sources',
+                  responseMode: resolvedResponseMode,
+                  sources: searchSources,
+                })
+              }
             }
 
             if (
@@ -1513,6 +1930,28 @@ export async function onRequestPost(
 
             if (
               finalEvent.type ===
+                'response.reasoning.search_results'
+            ) {
+              const mergedSources =
+                mergeSearchSources(
+                  searchSources,
+                  finalEvent.results
+                )
+
+              if (mergedSources.changed) {
+                searchSources =
+                  mergedSources.sources
+
+                await sendClientEvent({
+                  type: 'sources',
+                  responseMode: resolvedResponseMode,
+                  sources: searchSources,
+                })
+              }
+            }
+
+            if (
+              finalEvent.type ===
                 'response.output_text.delta' &&
               typeof finalEvent.delta === 'string' &&
               finalEvent.delta
@@ -1532,6 +1971,25 @@ export async function onRequestPost(
             ) {
               completedResponse =
                 finalEvent.response
+
+              const mergedSources =
+                mergeSearchSources(
+                  searchSources,
+                  extractResponseSearchResults(
+                    finalEvent.response
+                  )
+                )
+
+              if (mergedSources.changed) {
+                searchSources =
+                  mergedSources.sources
+
+                await sendClientEvent({
+                  type: 'sources',
+                  responseMode: resolvedResponseMode,
+                  sources: searchSources,
+                })
+              }
             }
 
             if (
@@ -1544,12 +2002,35 @@ export async function onRequestPost(
           }
         }
 
+        const finalSourceMerge =
+          mergeSearchSources(
+            searchSources,
+            extractResponseSearchResults(
+              completedResponse
+            )
+          )
+
+        if (finalSourceMerge.changed) {
+          searchSources =
+            finalSourceMerge.sources
+
+          await sendClientEvent({
+            type: 'sources',
+            responseMode: resolvedResponseMode,
+            sources: searchSources,
+          })
+        }
+
         const completedText = completedResponse
           ? extractAgentText(completedResponse)
           : ''
 
         const finalReply =
           completedText.trim() || reply.trim()
+
+        if (clientGenerationStopped) {
+          throw new ClientGenerationStoppedError()
+        }
 
         if (!finalReply) {
           throw new Error(
@@ -1597,7 +2078,13 @@ export async function onRequestPost(
             p_amount: creditsUsed,
             p_model_id: resolvedModel.id,
             p_description:
-              `${resolvedModel.name} usage — $${providerCostUsd.toFixed(6)}`,
+              `${resolvedModel.name} ${
+                resolvedResponseMode === 'research'
+                  ? 'Research'
+                  : resolvedResponseMode === 'web_search'
+                    ? 'Web Search'
+                    : 'Chat'
+              } usage — $${providerCostUsd.toFixed(6)}`,
           }
         )
 
@@ -1623,7 +2110,7 @@ export async function onRequestPost(
           data: savedExchangeData,
           error: historyError,
         } = await supabaseAdmin.rpc(
-          'save_chat_exchange_v5',
+          'save_chat_exchange_v6',
           {
             p_user_id: authenticatedUserId,
             p_model_id: resolvedModel.id,
@@ -1634,6 +2121,8 @@ export async function onRequestPost(
             p_provider_response_id:
               providerResponseId,
             p_attachment_ids: attachmentIds,
+            p_response_mode: resolvedResponseMode,
+            p_sources: searchSources,
           }
         )
 
@@ -1671,8 +2160,17 @@ export async function onRequestPost(
           creditsUsed,
           creditsRemaining:
             creditResult.credits_remaining,
+          responseMode: resolvedResponseMode,
+          sources: searchSources,
         })
       } catch (error) {
+        if (
+          error instanceof
+          ClientGenerationStoppedError
+        ) {
+          return
+        }
+
         const errorMessage =
           error instanceof Error
             ? error.message
@@ -1688,6 +2186,8 @@ export async function onRequestPost(
           error: errorMessage,
         })
       } finally {
+        providerReader = null
+
         try {
           reader.releaseLock()
         } catch {
