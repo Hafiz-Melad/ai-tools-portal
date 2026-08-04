@@ -12,13 +12,16 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.111.0",
     "fflate": "^0.8.3",
+    "katex": "^0.18.1",
     "pdfjs-dist": "4.10.38",
     "prism-react-renderer": "^2.4.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.2",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
