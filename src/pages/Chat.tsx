@@ -18,6 +18,12 @@ import ReactMarkdown, {
 import remarkGfm from 'remark-gfm'
 
 import {
+  Highlight,
+  themes,
+  type Language,
+} from 'prism-react-renderer'
+
+import {
   useLocation,
   useNavigate,
   useParams,
@@ -644,10 +650,155 @@ function getCodeLanguage(
 
   const match =
     elementProps.className?.match(
-      /language-([a-zA-Z0-9_-]+)/
+      /language-([a-zA-Z0-9_+-]+)/
     )
 
   return match?.[1] ?? null
+}
+
+const codeLanguageAliases: Record<
+  string,
+  Language
+> = {
+  bash: 'bash',
+  shell: 'bash',
+  sh: 'bash',
+  zsh: 'bash',
+  powershell: 'bash',
+  ps1: 'bash',
+  c: 'c',
+  cpp: 'cpp',
+  'c++': 'cpp',
+  csharp: 'clike',
+  cs: 'clike',
+  java: 'clike',
+  kotlin: 'clike',
+  rust: 'clike',
+  css: 'css',
+  javascript: 'javascript',
+  js: 'javascript',
+  jsx: 'jsx',
+  typescript: 'typescript',
+  ts: 'typescript',
+  tsx: 'tsx',
+  json: 'json',
+  jsonc: 'json',
+  python: 'python',
+  py: 'python',
+  sql: 'sql',
+  graphql: 'graphql',
+  gql: 'graphql',
+  html: 'markup',
+  xml: 'markup',
+  svg: 'markup',
+  markup: 'markup',
+  markdown: 'markdown',
+  md: 'markdown',
+  yaml: 'yaml',
+  yml: 'yaml',
+  diff: 'diff',
+  git: 'git',
+  go: 'go',
+  golang: 'go',
+  scss: 'scss',
+  sass: 'sass',
+  less: 'less',
+  makefile: 'makefile',
+  wasm: 'wasm',
+  handlebars: 'handlebars',
+  hbs: 'handlebars',
+  objectivec: 'objectivec',
+  objc: 'objectivec',
+  ocaml: 'ocaml',
+  reason: 'reason',
+}
+
+const codeLanguageLabels: Record<
+  string,
+  string
+> = {
+  bash: 'Bash',
+  shell: 'Shell',
+  sh: 'Shell',
+  zsh: 'Zsh',
+  powershell: 'PowerShell',
+  ps1: 'PowerShell',
+  c: 'C',
+  cpp: 'C++',
+  'c++': 'C++',
+  csharp: 'C#',
+  cs: 'C#',
+  java: 'Java',
+  kotlin: 'Kotlin',
+  rust: 'Rust',
+  css: 'CSS',
+  javascript: 'JavaScript',
+  js: 'JavaScript',
+  jsx: 'JSX',
+  typescript: 'TypeScript',
+  ts: 'TypeScript',
+  tsx: 'TSX',
+  json: 'JSON',
+  jsonc: 'JSON with comments',
+  python: 'Python',
+  py: 'Python',
+  sql: 'SQL',
+  graphql: 'GraphQL',
+  gql: 'GraphQL',
+  html: 'HTML',
+  xml: 'XML',
+  svg: 'SVG',
+  markup: 'Markup',
+  markdown: 'Markdown',
+  md: 'Markdown',
+  yaml: 'YAML',
+  yml: 'YAML',
+  diff: 'Diff',
+  git: 'Git',
+  go: 'Go',
+  golang: 'Go',
+  scss: 'SCSS',
+  sass: 'Sass',
+  less: 'Less',
+  makefile: 'Makefile',
+  wasm: 'WebAssembly',
+  handlebars: 'Handlebars',
+  hbs: 'Handlebars',
+  objectivec: 'Objective-C',
+  objc: 'Objective-C',
+  ocaml: 'OCaml',
+  reason: 'Reason',
+}
+
+function normalizeCodeLanguage(
+  value: string | null
+): Language {
+  if (!value) {
+    return 'markup'
+  }
+
+  return (
+    codeLanguageAliases[
+      value.trim().toLowerCase()
+    ] ?? 'markup'
+  )
+}
+
+function getCodeLanguageLabel(
+  value: string | null
+): string {
+  if (!value) {
+    return 'Code'
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+
+  return (
+    codeLanguageLabels[normalized] ??
+    normalized.toUpperCase()
+  )
 }
 
 function MarkdownCodeBlock({
@@ -660,7 +811,13 @@ function MarkdownCodeBlock({
   const code = getReactNodeText(children)
     .replace(/\n$/, '')
 
-  const language = getCodeLanguage(children)
+  const rawLanguage = getCodeLanguage(children)
+  const language = normalizeCodeLanguage(
+    rawLanguage
+  )
+  const languageLabel = getCodeLanguageLabel(
+    rawLanguage
+  )
 
   async function copyCode() {
     try {
@@ -676,26 +833,84 @@ function MarkdownCodeBlock({
   }
 
   return (
-    <div className="my-4 overflow-hidden rounded-xl border border-[#44423e] bg-[#181817]">
-      <div className="flex min-h-10 items-center justify-between border-b border-[#393835] bg-[#222220] px-3">
-        <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#817b73]">
-          {language || 'Code'}
+    <div className="my-4 min-w-0 overflow-hidden rounded-xl border border-[#44423e] bg-[#181817]">
+      <div className="flex min-h-10 items-center justify-between gap-3 border-b border-[#393835] bg-[#222220] px-3">
+        <span className="truncate text-[10px] font-medium uppercase tracking-[0.12em] text-[#918a81]">
+          {languageLabel}
         </span>
 
         <button
           type="button"
           onClick={() => void copyCode()}
-          className="rounded-md px-2 py-1 text-[11px] text-[#aaa49c] transition hover:bg-[#333330] hover:text-[#eee9e1]"
-          aria-label="Copy code"
-          title="Copy code"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-[#aaa49c] transition hover:bg-[#333330] hover:text-[#eee9e1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#81766c]"
+          aria-label={
+            copied
+              ? 'Code copied'
+              : 'Copy code'
+          }
+          title={
+            copied
+              ? 'Copied'
+              : 'Copy code'
+          }
         >
-          {copied ? 'Copied' : 'Copy'}
+          <Icon
+            name={copied ? 'check' : 'copy'}
+            className="h-3.5 w-3.5"
+          />
+
+          <span>
+            {copied ? 'Copied' : 'Copy'}
+          </span>
         </button>
       </div>
 
-      <pre className="overflow-x-auto p-4 text-[13px] leading-6 text-[#e6e0d7]">
-        {children}
-      </pre>
+      <Highlight
+        theme={themes.vsDark}
+        code={code}
+        language={language}
+      >
+        {({
+          className,
+          style,
+          tokens,
+          getLineProps,
+          getTokenProps,
+        }) => (
+          <pre
+            className={`${className} overflow-x-auto p-4 font-mono text-[13px] leading-6`}
+            style={{
+              ...style,
+              margin: 0,
+              minWidth: 0,
+              background: 'transparent',
+            }}
+          >
+            <code className="block min-w-max">
+              {tokens.map((line, lineIndex) => {
+                const lineProps = getLineProps({
+                  line,
+                })
+
+                return (
+                  <span
+                    key={lineIndex}
+                    {...lineProps}
+                    className={`${lineProps.className ?? ''} block min-h-6`}
+                  >
+                    {line.map((token, tokenIndex) => (
+                      <span
+                        key={tokenIndex}
+                        {...getTokenProps({ token })}
+                      />
+                    ))}
+                  </span>
+                )
+              })}
+            </code>
+          </pre>
+        )}
+      </Highlight>
     </div>
   )
 }
