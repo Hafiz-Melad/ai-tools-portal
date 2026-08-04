@@ -17,12 +17,18 @@ type ResponseMode =
   | 'web_search'
   | 'research'
 
+type ReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+
 type ChatRequest = {
   modelId?: string
   message?: string
   conversationId?: string | null
   attachmentIds?: unknown
   responseMode?: unknown
+  reasoningEffort?: unknown
 }
 
 type CreditResult = {
@@ -107,6 +113,9 @@ type AgentRequestBody = {
   store: boolean
   previous_response_id?: string
   preset?: 'high'
+  reasoning?: {
+    effort: ReasoningEffort
+  }
   instructions?: string
   tools?: AgentTool[]
   max_steps?: number
@@ -392,6 +401,49 @@ function normalizeResponseMode(
   return {
     responseMode: null,
     error: 'The selected response mode is invalid.',
+  }
+}
+
+function normalizeReasoningEffort(
+  value: unknown
+): {
+  reasoningEffort: ReasoningEffort | null
+  error: string | null
+} {
+  if (value === undefined || value === null) {
+    return {
+      reasoningEffort: 'medium',
+      error: null,
+    }
+  }
+
+  if (typeof value !== 'string') {
+    return {
+      reasoningEffort: null,
+      error:
+        'The reasoning effort has an invalid format.',
+    }
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+
+  if (
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high'
+  ) {
+    return {
+      reasoningEffort: normalized,
+      error: null,
+    }
+  }
+
+  return {
+    reasoningEffort: null,
+    error:
+      'The selected reasoning effort is invalid.',
   }
 }
 
@@ -972,6 +1024,29 @@ export async function onRequestPost(
       )
     }
 
+    const {
+      reasoningEffort,
+      error: reasoningEffortError,
+    } = normalizeReasoningEffort(
+      requestBody.reasoningEffort
+    )
+
+    if (
+      reasoningEffortError ||
+      !reasoningEffort
+    ) {
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            reasoningEffortError ||
+            'The selected reasoning effort is invalid.',
+        },
+        400
+      )
+    }
+
     /*
      * Capture the validated mode as a non-null primitive.
      * TypeScript does not preserve the earlier narrowing inside
@@ -979,6 +1054,9 @@ export async function onRequestPost(
      */
     const resolvedResponseMode: ResponseMode =
       responseMode
+
+    const resolvedReasoningEffort: ReasoningEffort =
+      reasoningEffort
 
     if (attachmentIdError) {
       return jsonResponse(
@@ -1633,6 +1711,9 @@ export async function onRequestPost(
             : 600,
       stream: true,
       store: false,
+      reasoning: {
+        effort: resolvedReasoningEffort,
+      },
     }
 
     if (resolvedResponseMode === 'web_search') {
@@ -1652,7 +1733,12 @@ export async function onRequestPost(
       agentRequestBody.preset = 'high'
       agentRequestBody.instructions =
         RESEARCH_INSTRUCTIONS
-      agentRequestBody.max_steps = 10
+      agentRequestBody.max_steps =
+        resolvedReasoningEffort === 'low'
+          ? 4
+          : resolvedReasoningEffort === 'medium'
+            ? 7
+            : 10
     }
 
     if (previousResponseId) {

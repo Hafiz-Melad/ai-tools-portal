@@ -44,6 +44,11 @@ type ResponseMode =
   | 'web_search'
   | 'research'
 
+type ReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+
 type SearchSource = {
   id: number | null
   title: string
@@ -173,6 +178,7 @@ type HistoryApiResponse = {
   conversation?: HistoryConversation
   conversations?: HistoryConversation[]
   messages?: HistoryMessage[]
+  deletedConversationId?: string
 }
 
 type SidebarItemProps = {
@@ -195,6 +201,9 @@ const HISTORY_API_URL = import.meta.env.DEV
 const UPLOAD_ATTACHMENT_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/upload-attachment'
   : '/api/upload-attachment'
+
+const REASONING_EFFORT_STORAGE_KEY =
+  'claude_reasoning_effort'
 
 const MAX_ATTACHMENTS_PER_MESSAGE = 4
 const MAX_ATTACHMENT_SIZE_BYTES = 6 * 1024 * 1024
@@ -238,6 +247,53 @@ const extensionMimeTypes: Record<string, string> = {
   '.json': 'application/json',
 }
 
+function normalizeReasoningEffort(
+  value: unknown
+): ReasoningEffort {
+  if (typeof value !== 'string') {
+    return 'medium'
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+
+  if (
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high'
+  ) {
+    return normalized
+  }
+
+  return 'medium'
+}
+
+function getStoredReasoningEffort(): ReasoningEffort {
+  try {
+    return normalizeReasoningEffort(
+      window.localStorage.getItem(
+        REASONING_EFFORT_STORAGE_KEY
+      )
+    )
+  } catch {
+    return 'medium'
+  }
+}
+
+function storeReasoningEffort(
+  reasoningEffort: ReasoningEffort
+): void {
+  try {
+    window.localStorage.setItem(
+      REASONING_EFFORT_STORAGE_KEY,
+      reasoningEffort
+    )
+  } catch {
+    // The selection still works for this browser session.
+  }
+}
+
 function Icon({
   name,
   className = 'h-5 w-5',
@@ -260,6 +316,7 @@ function Icon({
     | 'close'
     | 'mic'
     | 'wave'
+    | 'trash'
   className?: string
 }) {
   const common = {
@@ -425,6 +482,15 @@ function Icon({
         <path d="M13.6 8.5v7" {...common} />
         <path d="M16.8 6.5v11" {...common} />
         <path d="M20 10v4" {...common} />
+      </>
+    ),
+    trash: (
+      <>
+        <path d="M4.5 7h15" {...common} />
+        <path d="M9 7V4.8h6V7" {...common} />
+        <path d="m7 7 .8 13h8.4L17 7" {...common} />
+        <path d="M10 10.5v6" {...common} />
+        <path d="M14 10.5v6" {...common} />
       </>
     ),
   }
@@ -1426,6 +1492,11 @@ function Chat() {
   const [responseMode, setResponseMode] =
     useState<ResponseMode>('chat')
 
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffort>(
+      getStoredReasoningEffort
+    )
+
   const [
     pendingAttachments,
     setPendingAttachments,
@@ -1472,6 +1543,11 @@ function Chat() {
 
   const [signingOut, setSigningOut] =
     useState(false)
+
+  const [
+    deletingConversationId,
+    setDeletingConversationId,
+  ] = useState<string | null>(null)
 
   const activeModel = useMemo(
     () =>
@@ -2730,6 +2806,8 @@ function Chat() {
     const selectedModel = activeModel
     const selectedResponseMode =
       responseMode
+    const selectedReasoningEffort =
+      reasoningEffort
     const assistantMessageId = crypto.randomUUID()
     const generationAbortController =
       new AbortController()
@@ -2813,6 +2891,8 @@ function Chat() {
               ),
             responseMode:
               selectedResponseMode,
+            reasoningEffort:
+              selectedReasoningEffort,
           }),
           signal:
             generationAbortController.signal,
@@ -3258,6 +3338,108 @@ function Chat() {
     )
   }
 
+  async function deleteConversation(
+    conversation: HistoryConversation
+  ) {
+    if (
+      deletingConversationId ||
+      sending ||
+      attachmentUploadInProgress
+    ) {
+      return
+    }
+
+    const title =
+      conversation.title?.trim() ||
+      'Untitled conversation'
+
+    const confirmed = window.confirm(
+      `Delete "${title}"?\n\nThis permanently removes the conversation, its messages, and its attachments.`
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    try {
+      setError(null)
+      setDeletingConversationId(conversation.id)
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session?.access_token) {
+        throw new Error(
+          'Your login session has expired.'
+        )
+      }
+
+      const response = await fetch(
+        HISTORY_API_URL,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            conversationId: conversation.id,
+          }),
+        }
+      )
+
+      let result: HistoryApiResponse
+
+      try {
+        result =
+          (await response.json()) as
+            HistoryApiResponse
+      } catch {
+        throw new Error(
+          'The history server returned an invalid response.'
+        )
+      }
+
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.error ||
+            'Could not delete the conversation.'
+        )
+      }
+
+      setConversations((current) =>
+        current.filter(
+          (item) =>
+            item.id !== conversation.id
+        )
+      )
+
+      if (conversation.id === conversationId) {
+        startNewChat(
+          activeModelId ||
+            conversation.model_id
+        )
+      }
+    } catch (deleteError) {
+      console.error(deleteError)
+
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : 'Could not delete the conversation.'
+      )
+    } finally {
+      setDeletingConversationId(null)
+    }
+  }
+
   async function copyMessage(
     chatMessage: ChatMessage
   ) {
@@ -3412,32 +3594,77 @@ function Chat() {
             )}
 
           {!bootstrapLoading &&
-            conversations.map((conversation) => (
-              <button
-                key={conversation.id}
-                type="button"
-                onClick={() =>
-                  openConversation(conversation)
-                }
-                className={[
-                  'w-full rounded-lg px-3 py-2 text-left transition hover:bg-[#2b2b29]',
-                  conversation.id === conversationId
-                    ? 'bg-[#2b2b29]'
-                    : '',
-                ].join(' ')}
-              >
-                <p className="truncate text-sm text-[#ddd7ce]">
-                  {conversation.title ||
-                    'Untitled conversation'}
-                </p>
+            conversations.map((conversation) => {
+              const isDeleting =
+                deletingConversationId ===
+                conversation.id
 
-                <p className="mt-1 text-[10px] text-[#817b73]">
-                  {formatConversationDate(
-                    conversation.created_at
-                  )}
-                </p>
-              </button>
-            ))}
+              return (
+                <div
+                  key={conversation.id}
+                  className={[
+                    'group flex items-center rounded-lg transition hover:bg-[#2b2b29]',
+                    conversation.id === conversationId
+                      ? 'bg-[#2b2b29]'
+                      : '',
+                  ].join(' ')}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openConversation(conversation)
+                    }
+                    disabled={isDeleting}
+                    className="min-w-0 flex-1 px-3 py-2 text-left disabled:cursor-wait disabled:opacity-55"
+                  >
+                    <p className="truncate text-sm text-[#ddd7ce]">
+                      {conversation.title ||
+                        'Untitled conversation'}
+                    </p>
+
+                    <p className="mt-1 text-[10px] text-[#817b73]">
+                      {formatConversationDate(
+                        conversation.created_at
+                      )}
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void deleteConversation(
+                        conversation
+                      )
+                    }
+                    disabled={
+                      deletingConversationId !== null ||
+                      sending ||
+                      attachmentUploadInProgress
+                    }
+                    className="mr-2 rounded-md p-1.5 text-[#8c857d] opacity-70 transition hover:bg-red-950/40 hover:text-red-300 hover:opacity-100 focus:opacity-100 disabled:cursor-wait disabled:opacity-40"
+                    aria-label={`Delete ${
+                      conversation.title ||
+                      'untitled conversation'
+                    }`}
+                    title="Delete conversation"
+                  >
+                    {isDeleting ? (
+                      <span
+                        className="block h-4 w-4 text-center text-xs leading-4"
+                        aria-hidden="true"
+                      >
+                        …
+                      </span>
+                    ) : (
+                      <Icon
+                        name="trash"
+                        className="h-4 w-4"
+                      />
+                    )}
+                  </button>
+                </div>
+              )
+            })}
         </div>
       </div>
 
@@ -4088,6 +4315,51 @@ function Chat() {
                         className="bg-[#2a2a28]"
                       >
                         Research
+                      </option>
+                    </select>
+
+                    <select
+                      value={reasoningEffort}
+                      onChange={(event) => {
+                        const nextReasoningEffort =
+                          normalizeReasoningEffort(
+                            event.target.value
+                          )
+
+                        setReasoningEffort(
+                          nextReasoningEffort
+                        )
+                        storeReasoningEffort(
+                          nextReasoningEffort
+                        )
+                      }}
+                      disabled={
+                        sending ||
+                        bootstrapLoading ||
+                        conversationLoading ||
+                        !canSendMessages
+                      }
+                      title="Reasoning effort"
+                      aria-label="Reasoning effort"
+                      className="max-w-[105px] cursor-pointer appearance-none rounded-lg bg-[#333330] px-2.5 py-2 text-xs font-medium text-[#d8d2c9] outline-none transition hover:bg-[#3a3935] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <option
+                        value="low"
+                        className="bg-[#2a2a28]"
+                      >
+                        Low
+                      </option>
+                      <option
+                        value="medium"
+                        className="bg-[#2a2a28]"
+                      >
+                        Medium
+                      </option>
+                      <option
+                        value="high"
+                        className="bg-[#2a2a28]"
+                      >
+                        High
                       </option>
                     </select>
 

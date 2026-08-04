@@ -34,6 +34,11 @@ type AIModel = {
   enabled: boolean
 }
 
+type ReasoningEffort =
+  | 'low'
+  | 'medium'
+  | 'high'
+
 type HistoryModel = {
   id: string
   name: string
@@ -68,6 +73,9 @@ const HISTORY_API_URL = import.meta.env.DEV
   ? 'https://ai-tools-portal-9h5.pages.dev/api/history'
   : '/api/history'
 
+const REASONING_EFFORT_STORAGE_KEY =
+  'claude_reasoning_effort'
+
 const PROMPT_PRESETS = [
   {
     label: 'Write',
@@ -90,6 +98,53 @@ const PROMPT_PRESETS = [
     prompt: 'Suggest something useful we can work on together.',
   },
 ]
+
+function normalizeReasoningEffort(
+  value: unknown
+): ReasoningEffort {
+  if (typeof value !== 'string') {
+    return 'medium'
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+
+  if (
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high'
+  ) {
+    return normalized
+  }
+
+  return 'medium'
+}
+
+function getStoredReasoningEffort(): ReasoningEffort {
+  try {
+    return normalizeReasoningEffort(
+      window.localStorage.getItem(
+        REASONING_EFFORT_STORAGE_KEY
+      )
+    )
+  } catch {
+    return 'medium'
+  }
+}
+
+function storeReasoningEffort(
+  reasoningEffort: ReasoningEffort
+): void {
+  try {
+    window.localStorage.setItem(
+      REASONING_EFFORT_STORAGE_KEY,
+      reasoningEffort
+    )
+  } catch {
+    // The selection still works for this browser session.
+  }
+}
 
 function normalizeModelRelation(
   value: unknown
@@ -406,6 +461,11 @@ function Portal() {
 
   const [selectedModelId, setSelectedModelId] =
     useState('')
+
+  const [reasoningEffort, setReasoningEffort] =
+    useState<ReasoningEffort>(
+      getStoredReasoningEffort
+    )
 
   const [draft, setDraft] = useState('')
 
@@ -1156,14 +1216,45 @@ function Portal() {
                       </select>
                     </label>
 
-                    <button
-                      type="button"
-                      disabled
-                      title="Reasoning control will be added with chat tools"
-                      className="rounded-lg px-1.5 py-2 text-xs text-[#9f9991]"
+                    <select
+                      value={reasoningEffort}
+                      onChange={(event) => {
+                        const nextReasoningEffort =
+                          normalizeReasoningEffort(
+                            event.target.value
+                          )
+
+                        setReasoningEffort(
+                          nextReasoningEffort
+                        )
+                        storeReasoningEffort(
+                          nextReasoningEffort
+                        )
+                      }}
+                      disabled={!canStartChat}
+                      title="Reasoning effort"
+                      aria-label="Reasoning effort"
+                      className="max-w-[105px] cursor-pointer appearance-none rounded-lg bg-[#333330] px-2.5 py-2 text-xs font-medium text-[#d8d2c9] outline-none transition hover:bg-[#3a3935] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Medium⌄
-                    </button>
+                      <option
+                        value="low"
+                        className="bg-[#2a2a28]"
+                      >
+                        Low
+                      </option>
+                      <option
+                        value="medium"
+                        className="bg-[#2a2a28]"
+                      >
+                        Medium
+                      </option>
+                      <option
+                        value="high"
+                        className="bg-[#2a2a28]"
+                      >
+                        High
+                      </option>
+                    </select>
 
                     <button
                       type="button"
