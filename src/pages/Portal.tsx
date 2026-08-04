@@ -51,6 +51,7 @@ type Conversation = {
 type HistoryApiResponse = {
   success: boolean
   conversations?: Conversation[]
+  deletedConversationId?: string
   error?: string
 }
 
@@ -222,6 +223,7 @@ function Icon({
     | 'send'
     | 'credit'
     | 'logout'
+    | 'trash'
   className?: string
 }) {
   const common = {
@@ -367,6 +369,15 @@ function Icon({
         <path d="M8 12h8.5" {...common} />
       </>
     ),
+    trash: (
+      <>
+        <path d="M4.5 7h15" {...common} />
+        <path d="M9 7V4.8h6V7" {...common} />
+        <path d="m7 7 .8 13h8.4L17 7" {...common} />
+        <path d="M10 10.5v6" {...common} />
+        <path d="M14 10.5v6" {...common} />
+      </>
+    ),
   }
 
   return (
@@ -406,6 +417,11 @@ function Portal() {
 
   const [conversationError, setConversationError] =
     useState<string | null>(null)
+
+  const [
+    deletingConversationId,
+    setDeletingConversationId,
+  ] = useState<string | null>(null)
 
   const [error, setError] =
     useState<string | null>(null)
@@ -656,6 +672,100 @@ function Portal() {
     openNewChat()
   }
 
+  async function handleDeleteConversation(
+    conversation: Conversation
+  ) {
+    if (deletingConversationId) {
+      return
+    }
+
+    const conversationTitle =
+      conversation.title?.trim() ||
+      'Untitled conversation'
+
+    const confirmed = window.confirm(
+      `Delete "${conversationTitle}"?\n\nThis permanently removes the conversation, its messages, and its attachments.`
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    try {
+      setConversationError(null)
+      setDeletingConversationId(conversation.id)
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session?.access_token) {
+        throw new Error(
+          'Your login session has expired.'
+        )
+      }
+
+      const deleteResponse = await fetch(
+        HISTORY_API_URL,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            conversationId: conversation.id,
+          }),
+        }
+      )
+
+      let deleteResult: HistoryApiResponse
+
+      try {
+        deleteResult =
+          (await deleteResponse.json()) as
+            HistoryApiResponse
+      } catch {
+        throw new Error(
+          'The history server returned an invalid response.'
+        )
+      }
+
+      if (
+        !deleteResponse.ok ||
+        !deleteResult.success
+      ) {
+        throw new Error(
+          deleteResult.error ||
+            'Could not delete the conversation.'
+        )
+      }
+
+      setConversations((currentConversations) =>
+        currentConversations.filter(
+          (currentConversation) =>
+            currentConversation.id !== conversation.id
+        )
+      )
+    } catch (deleteError) {
+      console.error(deleteError)
+
+      setConversationError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : 'Could not delete the conversation.'
+      )
+    } finally {
+      setDeletingConversationId(null)
+    }
+  }
+
   async function handleSignOut() {
     try {
       setSigningOut(true)
@@ -833,37 +943,78 @@ function Portal() {
                         conversation
                       )
 
+                    const isDeleting =
+                      deletingConversationId ===
+                      conversation.id
+
                     return (
-                      <button
+                      <div
                         key={conversation.id}
-                        type="button"
-                        onClick={() =>
-                          navigate(
-                            `/chat/${conversation.model_id}?conversation=${conversation.id}`
-                          )
-                        }
-                        className="group w-full rounded-lg px-3 py-2 text-left transition hover:bg-[#2b2b29]"
+                        className="group flex items-center rounded-lg transition hover:bg-[#2b2b29]"
                       >
-                        <p className="truncate text-sm text-[#ddd7ce]">
-                          {conversation.title ||
-                            'Untitled conversation'}
-                        </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            navigate(
+                              `/chat/${conversation.model_id}?conversation=${conversation.id}`
+                            )
+                          }
+                          disabled={isDeleting}
+                          className="min-w-0 flex-1 px-3 py-2 text-left disabled:cursor-wait disabled:opacity-55"
+                        >
+                          <p className="truncate text-sm text-[#ddd7ce]">
+                            {conversation.title ||
+                              'Untitled conversation'}
+                          </p>
 
-                        <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-[#817b73]">
-                          <span className="truncate">
-                            {conversationModel?.name ||
-                              'Claude'}
-                          </span>
+                          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-[#817b73]">
+                            <span className="truncate">
+                              {conversationModel?.name ||
+                                'Claude'}
+                            </span>
 
-                          <span>·</span>
+                            <span>·</span>
 
-                          <span className="shrink-0">
-                            {formatConversationDate(
-                              conversation.created_at
-                            )}
-                          </span>
-                        </div>
-                      </button>
+                            <span className="shrink-0">
+                              {formatConversationDate(
+                                conversation.created_at
+                              )}
+                            </span>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleDeleteConversation(
+                              conversation
+                            )
+                          }
+                          disabled={
+                            deletingConversationId !== null
+                          }
+                          className="mr-2 rounded-md p-1.5 text-[#8c857d] opacity-100 transition hover:bg-red-950/40 hover:text-red-300 disabled:cursor-wait disabled:opacity-40 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100"
+                          aria-label={`Delete ${
+                            conversation.title ||
+                            'untitled conversation'
+                          }`}
+                          title="Delete conversation"
+                        >
+                          {isDeleting ? (
+                            <span
+                              className="block h-4 w-4 text-center text-xs leading-4"
+                              aria-hidden="true"
+                            >
+                              …
+                            </span>
+                          ) : (
+                            <Icon
+                              name="trash"
+                              className="h-4 w-4"
+                            />
+                          )}
+                        </button>
+                      </div>
                     )
                   })}
               </div>
