@@ -38,10 +38,24 @@ type CreateCustomerApiResponse = {
   error?: string
 }
 
+type AdjustCreditsApiResponse = {
+  success: boolean
+  result?: {
+    customerUserId: string
+    creditsBefore: number
+    adjustment: number
+    creditsAfter: number
+  }
+  error?: string
+}
+
 const ADMIN_USERS_API_URL = '/api/admin-users'
 
 const ADMIN_CREATE_USER_API_URL =
   '/api/admin-create-user'
+
+const ADMIN_ADJUST_CREDITS_API_URL =
+  '/api/admin-adjust-credits'
 
 function formatCreatedAt(value: string): string {
   const date = new Date(value)
@@ -79,10 +93,8 @@ function AdminPage() {
   >([])
 
   const [loading, setLoading] = useState(true)
-
   const [refreshing, setRefreshing] =
     useState(false)
-
   const [signingOut, setSigningOut] =
     useState(false)
 
@@ -91,9 +103,7 @@ function AdminPage() {
   >(null)
 
   const [email, setEmail] = useState('')
-
   const [password, setPassword] = useState('')
-
   const [credits, setCredits] = useState('')
 
   const [creatingAccount, setCreatingAccount] =
@@ -105,6 +115,36 @@ function AdminPage() {
 
   const [createSuccess, setCreateSuccess] =
     useState<string | null>(null)
+
+  const [
+    selectedAdjustmentAccount,
+    setSelectedAdjustmentAccount,
+  ] = useState<AdminAccount | null>(null)
+
+  const [
+    adjustmentAmount,
+    setAdjustmentAmount,
+  ] = useState('')
+
+  const [
+    adjustmentDescription,
+    setAdjustmentDescription,
+  ] = useState('')
+
+  const [
+    adjustingCredits,
+    setAdjustingCredits,
+  ] = useState(false)
+
+  const [
+    adjustmentError,
+    setAdjustmentError,
+  ] = useState<string | null>(null)
+
+  const [
+    adjustmentSuccess,
+    setAdjustmentSuccess,
+  ] = useState<string | null>(null)
 
   const loadAccounts = useCallback(
     async (
@@ -296,9 +336,182 @@ function AdminPage() {
     }
   }
 
+  function openCreditAdjustment(
+    account: AdminAccount
+  ): void {
+    setSelectedAdjustmentAccount(account)
+    setAdjustmentAmount('')
+    setAdjustmentDescription('')
+    setAdjustmentError(null)
+    setAdjustmentSuccess(null)
+  }
+
+  function closeCreditAdjustment(): void {
+    if (adjustingCredits) {
+      return
+    }
+
+    setSelectedAdjustmentAccount(null)
+    setAdjustmentAmount('')
+    setAdjustmentDescription('')
+    setAdjustmentError(null)
+    setAdjustmentSuccess(null)
+  }
+
+  async function handleAdjustCredits(
+    event: FormEvent<HTMLFormElement>
+  ): Promise<void> {
+    event.preventDefault()
+
+    if (!selectedAdjustmentAccount) {
+      return
+    }
+
+    const parsedAmount =
+      Number(adjustmentAmount)
+
+    if (
+      adjustmentAmount.trim() === '' ||
+      !Number.isInteger(parsedAmount) ||
+      parsedAmount === 0 ||
+      Math.abs(parsedAmount) > 1_000_000
+    ) {
+      setAdjustmentError(
+        'Enter a non-zero whole number between -1,000,000 and 1,000,000.'
+      )
+
+      return
+    }
+
+    if (
+      parsedAmount < 0 &&
+      Math.abs(parsedAmount) >
+        selectedAdjustmentAccount.credits
+    ) {
+      setAdjustmentError(
+        'This adjustment would make the customer balance negative.'
+      )
+
+      return
+    }
+
+    try {
+      setAdjustingCredits(true)
+      setAdjustmentError(null)
+      setAdjustmentSuccess(null)
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session) {
+        navigate('/login', {
+          replace: true,
+        })
+
+        return
+      }
+
+      const response = await fetch(
+        ADMIN_ADJUST_CREDITS_API_URL,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            customerUserId:
+              selectedAdjustmentAccount.id,
+            amount: parsedAmount,
+            description:
+              adjustmentDescription.trim(),
+          }),
+        }
+      )
+
+      const payload =
+        (await response.json()) as AdjustCreditsApiResponse
+
+      if (
+        !response.ok ||
+        !payload.success ||
+        !payload.result
+      ) {
+        throw new Error(
+          payload.error ||
+            'Could not adjust customer credits.'
+        )
+      }
+
+      const updatedBalance =
+        payload.result.creditsAfter
+
+      setAccounts((currentAccounts) =>
+        currentAccounts.map((account) =>
+          account.id ===
+          selectedAdjustmentAccount.id
+            ? {
+                ...account,
+                credits: updatedBalance,
+                subscriptionStatus:
+                  updatedBalance === 0
+                    ? 'inactive'
+                    : account.subscriptionStatus,
+              }
+            : account
+        )
+      )
+
+      setSelectedAdjustmentAccount(
+        (currentAccount) =>
+          currentAccount
+            ? {
+                ...currentAccount,
+                credits: updatedBalance,
+                subscriptionStatus:
+                  updatedBalance === 0
+                    ? 'inactive'
+                    : currentAccount.subscriptionStatus,
+              }
+            : null
+      )
+
+      const actionWord =
+        parsedAmount > 0 ? 'added to' : 'removed from'
+
+      setAdjustmentSuccess(
+        `${Math.abs(
+          parsedAmount
+        ).toLocaleString()} credits were ${actionWord} ${
+          selectedAdjustmentAccount.email ??
+          'the customer'
+        }. New balance: ${updatedBalance.toLocaleString()}.`
+      )
+
+      setAdjustmentAmount('')
+      setAdjustmentDescription('')
+
+      await loadAccounts()
+    } catch (creditError) {
+      setAdjustmentError(
+        creditError instanceof Error
+          ? creditError.message
+          : 'Could not adjust customer credits.'
+      )
+    } finally {
+      setAdjustingCredits(false)
+    }
+  }
+
   async function handleRefresh(): Promise<void> {
     setRefreshing(true)
-
     await loadAccounts()
   }
 
@@ -348,8 +561,8 @@ function AdminPage() {
             </h1>
 
             <p className="mt-2 text-sm text-[#aaa49c]">
-              Create customer logins and review
-              existing accounts.
+              Create customer logins, review
+              accounts, and adjust credit balances.
             </p>
           </div>
 
@@ -393,7 +606,7 @@ function AdminPage() {
             <p className="mt-1 text-sm leading-6 text-[#8f8981]">
               The email is confirmed immediately. The
               customer can sign in using the password
-              you enter below.
+              entered below.
             </p>
           </div>
 
@@ -488,7 +701,6 @@ function AdminPage() {
             <div
               className="mt-4 rounded-xl border border-red-900/60 bg-red-950/25 px-4 py-3 text-sm leading-6 text-red-200"
               role="alert"
-              aria-live="polite"
             >
               {createError}
             </div>
@@ -498,12 +710,135 @@ function AdminPage() {
             <div
               className="mt-4 rounded-xl border border-emerald-900/60 bg-emerald-950/25 px-4 py-3 text-sm leading-6 text-emerald-200"
               role="status"
-              aria-live="polite"
             >
               {createSuccess}
             </div>
           )}
         </section>
+
+        {selectedAdjustmentAccount && (
+          <section className="mb-8 rounded-2xl border border-[#5a554d] bg-[#282824] p-5 sm:p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-[#9f988f]">
+                  Credit adjustment
+                </p>
+
+                <h2 className="mt-2 text-lg font-semibold text-[#eee9e1]">
+                  {selectedAdjustmentAccount.email ??
+                    'Customer account'}
+                </h2>
+
+                <p className="mt-1 text-sm text-[#aaa49c]">
+                  Current balance:{' '}
+                  <strong className="text-[#eee9e1]">
+                    {selectedAdjustmentAccount.credits.toLocaleString()}
+                  </strong>
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeCreditAdjustment}
+                disabled={adjustingCredits}
+                className="rounded-lg border border-[#4a4843] px-3 py-2 text-sm text-[#bdb6ad] transition hover:bg-[#30302d] disabled:opacity-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleAdjustCredits}
+              className="mt-6 grid gap-4 lg:grid-cols-[minmax(180px,0.5fr)_minmax(0,1.5fr)_auto] lg:items-end"
+            >
+              <label className="block">
+                <span className="text-sm font-medium text-[#d8d2c9]">
+                  Adjustment
+                </span>
+
+                <input
+                  type="number"
+                  value={adjustmentAmount}
+                  onChange={(event) => {
+                    setAdjustmentAmount(
+                      event.target.value
+                    )
+                    setAdjustmentError(null)
+                    setAdjustmentSuccess(null)
+                  }}
+                  required
+                  min={-1_000_000}
+                  max={1_000_000}
+                  step={1}
+                  disabled={adjustingCredits}
+                  placeholder="+500 or -200"
+                  className="mt-2 w-full rounded-xl border border-[#45433f] bg-[#2b2b28] px-4 py-3 text-[#f0ece4] outline-none transition placeholder:text-[#777169] focus:border-[#777169]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-sm font-medium text-[#d8d2c9]">
+                  Reason
+                </span>
+
+                <input
+                  type="text"
+                  value={adjustmentDescription}
+                  onChange={(event) => {
+                    setAdjustmentDescription(
+                      event.target.value
+                    )
+                    setAdjustmentError(null)
+                    setAdjustmentSuccess(null)
+                  }}
+                  maxLength={500}
+                  disabled={adjustingCredits}
+                  placeholder="Plan renewal, correction, refund..."
+                  className="mt-2 w-full rounded-xl border border-[#45433f] bg-[#2b2b28] px-4 py-3 text-[#f0ece4] outline-none transition placeholder:text-[#777169] focus:border-[#777169]"
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={
+                  adjustingCredits ||
+                  adjustmentAmount.trim() === '' ||
+                  Number(adjustmentAmount) === 0
+                }
+                className="h-[50px] rounded-xl bg-[#eee9e1] px-5 text-sm font-semibold text-[#272624] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {adjustingCredits
+                  ? 'Updating...'
+                  : 'Apply adjustment'}
+              </button>
+            </form>
+
+            <p className="mt-3 text-xs leading-5 text-[#8f8981]">
+              Use a positive number to add credits and
+              a negative number to remove credits.
+              Adding credits does not automatically
+              reactivate an inactive subscription.
+            </p>
+
+            {adjustmentError && (
+              <div
+                className="mt-4 rounded-xl border border-red-900/60 bg-red-950/25 px-4 py-3 text-sm text-red-200"
+                role="alert"
+              >
+                {adjustmentError}
+              </div>
+            )}
+
+            {adjustmentSuccess && (
+              <div
+                className="mt-4 rounded-xl border border-emerald-900/60 bg-emerald-950/25 px-4 py-3 text-sm text-emerald-200"
+                role="status"
+              >
+                {adjustmentSuccess}
+              </div>
+            )}
+          </section>
+        )}
 
         <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div className="rounded-2xl border border-[#3a3936] bg-[#242421] p-5">
@@ -521,7 +856,6 @@ function AdminPage() {
           <div
             className="mb-6 rounded-2xl border border-red-900/60 bg-red-950/25 px-5 py-4 text-sm leading-6 text-red-200"
             role="alert"
-            aria-live="polite"
           >
             {error}
           </div>
@@ -573,6 +907,10 @@ function AdminPage() {
                     <th className="px-5 py-3.5 font-medium">
                       Created
                     </th>
+
+                    <th className="px-5 py-3.5 font-medium">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
 
@@ -622,6 +960,20 @@ function AdminPage() {
                           {formatCreatedAt(
                             account.createdAt
                           )}
+                        </td>
+
+                        <td className="whitespace-nowrap px-5 py-4">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              openCreditAdjustment(
+                                account
+                              )
+                            }}
+                            className="rounded-lg border border-[#55514a] bg-[#2b2b28] px-3 py-2 text-xs font-medium text-[#ded8cf] transition hover:border-[#777169] hover:bg-[#32322f]"
+                          >
+                            Adjust credits
+                          </button>
                         </td>
                       </tr>
                     )
