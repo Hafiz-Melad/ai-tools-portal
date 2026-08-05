@@ -10,10 +10,12 @@ import Tools from './components/Tools'
 import Plans from './components/Plans'
 import HowItWorks from './components/HowItWorks'
 import ProtectedRoute from './components/ProtectedRoute'
+import AdminRoute from './components/AdminRoute'
 
 import Login from './pages/Login'
 import Portal from './pages/Portal'
 import Chat from './pages/Chat'
+import Admin from './pages/AdminPage'
 
 function Home() {
   return (
@@ -50,6 +52,15 @@ function App() {
             <ProtectedRoute>
               <Chat />
             </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/admin"
+          element={
+            <AdminRoute>
+              <Admin />
+            </AdminRoute>
           }
         />
       </Routes>

@@ -12,7 +12,9 @@ function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [signingIn, setSigningIn] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(
+    null
+  )
 
   async function handleSubmit(
     event: FormEvent<HTMLFormElement>
@@ -30,17 +32,41 @@ function Login() {
       setSigningIn(true)
       setError(null)
 
-      const { error: signInError } =
-        await supabase.auth.signInWithPassword({
-          email: cleanedEmail,
-          password,
-        })
+      const {
+        data: signInData,
+        error: signInError,
+      } = await supabase.auth.signInWithPassword({
+        email: cleanedEmail,
+        password,
+      })
 
       if (signInError) {
         throw signInError
       }
 
-      navigate('/portal', {
+      let destination = '/portal'
+
+      if (signInData.user) {
+        const {
+          data: profile,
+          error: profileError,
+        } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', signInData.user.id)
+          .maybeSingle()
+
+        if (profileError) {
+          console.error(
+            'Could not determine login destination:',
+            profileError
+          )
+        } else if (profile?.role === 'admin') {
+          destination = '/admin'
+        }
+      }
+
+      navigate(destination, {
         replace: true,
       })
     } catch (signInError) {
@@ -73,7 +99,8 @@ function Login() {
           </h1>
 
           <p className="mt-3 text-sm leading-6 text-[#aaa49c]">
-            Sign in using the credentials provided by your administrator.
+            Sign in using the credentials provided by your
+            administrator.
           </p>
         </div>
 
