@@ -36,6 +36,13 @@ type CreditResult = {
   credits_remaining: number
 }
 
+type ChatRequestSlotResult = {
+  allowed: boolean
+  reason: string | null
+  retry_after_seconds: number
+  remaining_requests: number
+}
+
 type ConversationMemory = {
   id: string
   model_id: string
@@ -248,6 +255,10 @@ const allowedOrigins = [
  * One credit represents $0.0001.
  */
 const CREDITS_PER_USD = 10_000
+
+const CHAT_RATE_LIMIT_MAX_REQUESTS = 8
+const CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
+const CHAT_ACTIVE_REQUEST_TIMEOUT_SECONDS = 15 * 60
 
 const ATTACHMENT_BUCKET = 'chat-attachments'
 const MAX_ATTACHMENTS_PER_MESSAGE = 4
@@ -693,6 +704,26 @@ function jsonResponse(
   })
 }
 
+function retryAfterJsonResponse(
+  request: Request,
+  body: unknown,
+  status: 409 | 429,
+  retryAfterSeconds: number
+): Response {
+  const normalizedRetryAfter = Math.max(
+    1,
+    Math.ceil(retryAfterSeconds)
+  )
+
+  return Response.json(body, {
+    status,
+    headers: {
+      ...getCorsHeaders(request),
+      'Retry-After': String(normalizedRetryAfter),
+    },
+  })
+}
+
 function extractAgentText(
   response: AgentResponse
 ): string {
@@ -891,6 +922,10 @@ export async function onRequestOptions(
 export async function onRequestPost(
   context: FunctionContext
 ): Promise<Response> {
+  let releaseChatRequestSlot:
+    | (() => Promise<void>)
+    | null = null
+
   try {
     const perplexityKey = requireEnv(
       context.env.PERPLEXITY_API_KEY,
@@ -974,6 +1009,39 @@ export async function onRequestPost(
      * asynchronous functions.
      */
     const authenticatedUserId = user.id
+
+    let chatRequestId: string | null = null
+    let chatRequestSlotAcquired = false
+
+    releaseChatRequestSlot = async (): Promise<void> => {
+      if (
+        !chatRequestSlotAcquired ||
+        !chatRequestId
+      ) {
+        return
+      }
+
+      const requestIdToRelease = chatRequestId
+
+      chatRequestSlotAcquired = false
+      chatRequestId = null
+
+      const { error: releaseError } =
+        await supabaseAdmin.rpc(
+          'release_chat_request_slot_v1',
+          {
+            p_user_id: authenticatedUserId,
+            p_request_id: requestIdToRelease,
+          }
+        )
+
+      if (releaseError) {
+        console.error(
+          'CHAT RATE LIMIT RELEASE ERROR:',
+          releaseError.message
+        )
+      }
+    }
 
     let requestBody: ChatRequest
 
@@ -1747,6 +1815,95 @@ export async function onRequestPost(
     }
 
     /*
+     * Acquire the authenticated user's generation slot immediately
+     * before contacting the provider. Invalid requests do not consume
+     * the per-minute allowance.
+     */
+    chatRequestId = crypto.randomUUID()
+
+    const {
+      data: requestSlotData,
+      error: requestSlotError,
+    } = await supabaseAdmin.rpc(
+      'acquire_chat_request_slot_v1',
+      {
+        p_user_id: authenticatedUserId,
+        p_request_id: chatRequestId,
+        p_max_requests:
+          CHAT_RATE_LIMIT_MAX_REQUESTS,
+        p_window_seconds:
+          CHAT_RATE_LIMIT_WINDOW_SECONDS,
+        p_active_timeout_seconds:
+          CHAT_ACTIVE_REQUEST_TIMEOUT_SECONDS,
+      }
+    )
+
+    if (requestSlotError) {
+      throw new Error(
+        `Could not apply the chat request limit: ${requestSlotError.message}`
+      )
+    }
+
+    const requestSlotResult = (
+      Array.isArray(requestSlotData)
+        ? requestSlotData[0]
+        : requestSlotData
+    ) as ChatRequestSlotResult | null
+
+    if (
+      !requestSlotResult ||
+      typeof requestSlotResult.allowed !== 'boolean'
+    ) {
+      throw new Error(
+        'The chat request limit returned an invalid result.'
+      )
+    }
+
+    if (!requestSlotResult.allowed) {
+      const retryAfterSeconds =
+        Number.isFinite(
+          requestSlotResult.retry_after_seconds
+        )
+          ? Math.max(
+              1,
+              Math.ceil(
+                requestSlotResult.retry_after_seconds
+              )
+            )
+          : 60
+
+      const activeGeneration =
+        requestSlotResult.reason ===
+        'active_generation'
+
+      chatRequestId = null
+
+      return retryAfterJsonResponse(
+        context.request,
+        {
+          success: false,
+          error: activeGeneration
+            ? 'Another response is already being generated for this account. Stop it or wait for it to finish before sending another message.'
+            : `Too many requests were started. Please wait ${retryAfterSeconds} seconds and try again.`,
+          reason: activeGeneration
+            ? 'active_generation'
+            : 'rate_limited',
+          retryAfterSeconds,
+          remainingRequests: Math.max(
+            0,
+            Number(
+              requestSlotResult.remaining_requests
+            ) || 0
+          ),
+        },
+        activeGeneration ? 409 : 429,
+        retryAfterSeconds
+      )
+    }
+
+    chatRequestSlotAcquired = true
+
+    /*
      * Contact the provider before opening the client stream.
      * Validation and provider-level HTTP errors remain normal JSON
      * responses, while successful generations become NDJSON streams.
@@ -1788,6 +1945,8 @@ export async function onRequestPost(
         }
       }
 
+      await releaseChatRequestSlot()
+
       return jsonResponse(
         context.request,
         {
@@ -1800,6 +1959,8 @@ export async function onRequestPost(
     }
 
     if (!perplexityResponse.body) {
+      await releaseChatRequestSlot()
+
       return jsonResponse(
         context.request,
         {
@@ -2280,6 +2441,7 @@ export async function onRequestPost(
           // No action required.
         }
 
+        await releaseChatRequestSlot?.()
         await closeClientStream()
       }
     }
@@ -2293,6 +2455,8 @@ export async function onRequestPost(
       headers: getStreamHeaders(context.request),
     })
   } catch (error) {
+    await releaseChatRequestSlot?.()
+
     const message =
       error instanceof Error
         ? error.message
