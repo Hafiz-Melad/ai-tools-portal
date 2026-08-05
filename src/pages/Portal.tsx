@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
 type Profile = {
-  full_name: string
+  full_name: string | null
   credits: number
 }
 
@@ -179,25 +179,39 @@ function formatConversationDate(value: string): string {
   }).format(date)
 }
 
-function getFirstName(fullName: string): string {
-  const firstName = fullName.trim().split(/\s+/)[0]
-  return firstName || 'there'
+function getFirstName(
+  fullName: string | null | undefined
+): string {
+  const cleanedName = fullName?.trim()
+
+  if (!cleanedName) {
+    return 'there'
+  }
+
+  return cleanedName.split(/\s+/)[0] || 'there'
 }
 
-function getInitials(fullName: string): string {
-  const parts = fullName
-    .trim()
+function getInitials(
+  fullName: string | null | undefined
+): string {
+  const cleanedName = fullName?.trim()
+
+  if (!cleanedName) {
+    return 'U'
+  }
+
+  const parts = cleanedName
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
 
-  if (parts.length === 0) {
-    return 'U'
-  }
-
-  return parts
-    .map((part) => part.charAt(0).toUpperCase())
-    .join('')
+  return (
+    parts
+      .map((part) =>
+        part.charAt(0).toUpperCase()
+      )
+      .join('') || 'U'
+  )
 }
 
 function getModelFamily(modelName: string): string {
@@ -1088,7 +1102,7 @@ function Portal() {
 
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-[#eee9e1]">
-                    {profile.full_name}
+                    {profile.full_name?.trim() || 'Customer'}
                   </p>
 
                   <p className="truncate text-[11px] text-[#8f8981]">
