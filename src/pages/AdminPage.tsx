@@ -49,6 +49,21 @@ type AdjustCreditsApiResponse = {
   error?: string
 }
 
+
+
+type DeleteCustomerApiResponse = {
+  success: boolean
+  deletedAccount?: {
+    id: string
+    email: string | null
+  }
+  cleanupWarnings?: string[]
+  error?: string
+}
+
+const ADMIN_DELETE_USER_API_URL =
+  '/api/admin-delete-user'
+
 const ADMIN_USERS_API_URL = '/api/admin-users'
 
 const ADMIN_CREATE_USER_API_URL =
@@ -87,6 +102,26 @@ function formatStatus(value: string): string {
 
 function AdminPage() {
   const navigate = useNavigate()
+
+  const [
+    selectedDeleteAccount,
+    setSelectedDeleteAccount,
+  ] = useState<AdminAccount | null>(null)
+
+  const [
+    deleteConfirmation,
+    setDeleteConfirmation,
+  ] = useState('')
+
+  const [deletingAccount, setDeletingAccount] =
+    useState(false)
+
+  const [deleteError, setDeleteError] = useState<
+    string | null
+  >(null)
+
+  const [deleteSuccess, setDeleteSuccess] =
+    useState<string | null>(null)
 
   const [accounts, setAccounts] = useState<
     AdminAccount[]
@@ -339,6 +374,10 @@ function AdminPage() {
   function openCreditAdjustment(
     account: AdminAccount
   ): void {
+    setSelectedDeleteAccount(null)
+    setDeleteConfirmation('')
+    setDeleteError(null)
+
     setSelectedAdjustmentAccount(account)
     setAdjustmentAmount('')
     setAdjustmentDescription('')
@@ -510,6 +549,134 @@ function AdminPage() {
     }
   }
 
+  function openDeleteAccount(
+    account: AdminAccount
+  ): void {
+    setSelectedAdjustmentAccount(null)
+    setAdjustmentAmount('')
+    setAdjustmentDescription('')
+    setAdjustmentError(null)
+    setAdjustmentSuccess(null)
+
+    setSelectedDeleteAccount(account)
+    setDeleteConfirmation('')
+    setDeleteError(null)
+    setDeleteSuccess(null)
+  }
+
+  function closeDeleteAccount(): void {
+    if (deletingAccount) {
+      return
+    }
+
+    setSelectedDeleteAccount(null)
+    setDeleteConfirmation('')
+    setDeleteError(null)
+  }
+
+  async function handleDeleteAccount(
+    event: FormEvent<HTMLFormElement>
+  ): Promise<void> {
+    event.preventDefault()
+
+    if (!selectedDeleteAccount) {
+      return
+    }
+
+    const requiredConfirmation =
+      selectedDeleteAccount.email?.trim() || 'DELETE'
+
+    if (
+      deleteConfirmation.trim().toLowerCase() !==
+      requiredConfirmation.toLowerCase()
+    ) {
+      setDeleteError(
+        `Type ${requiredConfirmation} exactly to confirm deletion.`
+      )
+
+      return
+    }
+
+    try {
+      setDeletingAccount(true)
+      setDeleteError(null)
+      setDeleteSuccess(null)
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession()
+
+      if (sessionError) {
+        throw sessionError
+      }
+
+      if (!session) {
+        navigate('/login', {
+          replace: true,
+        })
+
+        return
+      }
+
+      const response = await fetch(
+        ADMIN_DELETE_USER_API_URL,
+        {
+          method: 'POST',
+          headers: {
+            Authorization:
+              `Bearer ${session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            customerUserId:
+              selectedDeleteAccount.id,
+          }),
+        }
+      )
+
+      const payload =
+        (await response.json()) as DeleteCustomerApiResponse
+
+      if (!response.ok || !payload.success) {
+        throw new Error(
+          payload.error ||
+            'Could not delete the customer account.'
+        )
+      }
+
+      const deletedEmail =
+        payload.deletedAccount?.email ??
+        selectedDeleteAccount.email ??
+        'Customer account'
+
+      setAccounts((currentAccounts) =>
+        currentAccounts.filter(
+          (account) =>
+            account.id !== selectedDeleteAccount.id
+        )
+      )
+
+      setSelectedDeleteAccount(null)
+      setDeleteConfirmation('')
+      setDeleteError(null)
+
+      setDeleteSuccess(
+        `${deletedEmail} was permanently deleted.`
+      )
+
+      await loadAccounts()
+    } catch (accountDeleteError) {
+      setDeleteError(
+        accountDeleteError instanceof Error
+          ? accountDeleteError.message
+          : 'Could not delete the customer account.'
+      )
+    } finally {
+      setDeletingAccount(false)
+    }
+  }
+
   async function handleRefresh(): Promise<void> {
     setRefreshing(true)
     await loadAccounts()
@@ -562,7 +729,8 @@ function AdminPage() {
 
             <p className="mt-2 text-sm text-[#aaa49c]">
               Create customer logins, review
-              accounts, and adjust credit balances.
+              accounts, adjust credits, and delete
+              customer accounts.
             </p>
           </div>
 
@@ -840,6 +1008,98 @@ function AdminPage() {
           </section>
         )}
 
+        {selectedDeleteAccount && (
+          <section className="mb-8 rounded-2xl border border-red-900/70 bg-red-950/20 p-5 sm:p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-[0.14em] text-red-300">
+                  Permanent deletion
+                </p>
+
+                <h2 className="mt-2 text-lg font-semibold text-red-100">
+                  Delete{' '}
+                  {selectedDeleteAccount.email ??
+                    'customer account'}
+                </h2>
+
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-red-200/80">
+                  This permanently removes the customer’s
+                  authentication account. The customer will
+                  no longer be able to sign in. This action
+                  cannot be undone.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeDeleteAccount}
+                disabled={deletingAccount}
+                className="rounded-lg border border-red-900/70 px-3 py-2 text-sm text-red-200 transition hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleDeleteAccount}
+              className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+            >
+              <label className="block">
+                <span className="text-sm font-medium text-red-100">
+                  Type{' '}
+                  <strong>
+                    {selectedDeleteAccount.email ??
+                      'DELETE'}
+                  </strong>{' '}
+                  to confirm
+                </span>
+
+                <input
+                  type="text"
+                  value={deleteConfirmation}
+                  onChange={(event) => {
+                    setDeleteConfirmation(
+                      event.target.value
+                    )
+                    setDeleteError(null)
+                  }}
+                  disabled={deletingAccount}
+                  autoComplete="off"
+                  className="mt-2 w-full rounded-xl border border-red-900/70 bg-[#2b2424] px-4 py-3 text-red-50 outline-none transition placeholder:text-red-300/30 focus:border-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={
+                  deletingAccount ||
+                  deleteConfirmation
+                    .trim()
+                    .toLowerCase() !==
+                    (
+                      selectedDeleteAccount.email?.trim() ||
+                      'DELETE'
+                    ).toLowerCase()
+                }
+                className="h-[50px] rounded-xl bg-red-700 px-5 text-sm font-semibold text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {deletingAccount
+                  ? 'Deleting...'
+                  : 'Permanently delete'}
+              </button>
+            </form>
+
+            {deleteError && (
+              <div
+                className="mt-4 rounded-xl border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-200"
+                role="alert"
+              >
+                {deleteError}
+              </div>
+            )}
+          </section>
+        )}
+
         <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <div className="rounded-2xl border border-[#3a3936] bg-[#242421] p-5">
             <p className="text-sm text-[#8f8981]">
@@ -858,6 +1118,15 @@ function AdminPage() {
             role="alert"
           >
             {error}
+          </div>
+        )}
+
+        {deleteSuccess && (
+          <div
+            className="mb-6 rounded-2xl border border-emerald-900/60 bg-emerald-950/25 px-5 py-4 text-sm text-emerald-200"
+            role="status"
+          >
+            {deleteSuccess}
           </div>
         )}
 
@@ -963,17 +1232,29 @@ function AdminPage() {
                         </td>
 
                         <td className="whitespace-nowrap px-5 py-4">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              openCreditAdjustment(
-                                account
-                              )
-                            }}
-                            className="rounded-lg border border-[#55514a] bg-[#2b2b28] px-3 py-2 text-xs font-medium text-[#ded8cf] transition hover:border-[#777169] hover:bg-[#32322f]"
-                          >
-                            Adjust credits
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                openCreditAdjustment(
+                                  account
+                                )
+                              }}
+                              className="rounded-lg border border-[#55514a] bg-[#2b2b28] px-3 py-2 text-xs font-medium text-[#ded8cf] transition hover:border-[#777169] hover:bg-[#32322f]"
+                            >
+                              Adjust credits
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                openDeleteAccount(account)
+                              }}
+                              className="rounded-lg border border-red-900/70 bg-red-950/20 px-3 py-2 text-xs font-medium text-red-300 transition hover:border-red-700 hover:bg-red-950/40"
+                            >
+                              Delete
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
