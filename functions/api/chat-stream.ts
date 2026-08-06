@@ -273,19 +273,19 @@ const allowedOrigins = [
 const EXTRA_FEATURE_CREDITS_PER_USD = 40_000
 
 /*
- * Abuse protection uses an atomic reservation before the provider call.
- * The complete available balance is temporarily reserved, then the exact
- * provider-reported amount is settled and the unused portion is refunded.
+ * Abuse protection uses a bounded atomic reservation before the provider
+ * call. Only the estimated maximum budget for this request is reserved;
+ * the customer's remaining wallet stays available. Abandoned reservations
+ * become recoverable after 15 minutes.
  */
-const CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS = 24 * 60 * 60
+const CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS = 15 * 60
 const MAX_TRANSCRIPT_MESSAGES = 40
 const MAX_TRANSCRIPT_CHARACTERS = 80_000
 const IMAGE_INPUT_RESERVE_CREDITS = 20_000
 const CHAT_HIDDEN_INPUT_RESERVE_CREDITS = 4_000
-const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 3_000
+const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 12_000
 const RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS = 30_000
-const WEB_TOOL_CALL_RESERVE_CREDITS = 2_000
-const RESEARCH_TOOL_CALL_RESERVE_CREDITS = 12_200
+const TOOL_CALL_RESERVE_CREDITS = 12_200
 const MAX_TOOL_FEE_CREDITS = 200
 const MINIMUM_OUTPUT_TOKEN_BUDGET = 200
 const WEB_MAX_TOOL_CALLS = 3
@@ -894,20 +894,6 @@ function getMinimumToolCalls(
 
   if (responseMode === 'web_search') {
     return 1
-  }
-
-  return 0
-}
-
-function getToolCallReserveCredits(
-  responseMode: ResponseMode
-): number {
-  if (responseMode === 'research') {
-    return RESEARCH_TOOL_CALL_RESERVE_CREDITS
-  }
-
-  if (responseMode === 'web_search') {
-    return WEB_TOOL_CALL_RESERVE_CREDITS
   }
 
   return 0
@@ -2037,11 +2023,6 @@ export async function onRequestPost(
     const minimumToolCalls =
       getMinimumToolCalls(resolvedResponseMode)
 
-    const toolCallReserveCredits =
-      getToolCallReserveCredits(
-        resolvedResponseMode
-      )
-
     const fixedInputReserveCredits =
       getUtf8ByteLength(agentInput) +
       getModeHiddenInputReserve(
@@ -2053,7 +2034,12 @@ export async function onRequestPost(
     const minimumRequiredCredits =
       fixedInputReserveCredits +
       MINIMUM_OUTPUT_TOKEN_BUDGET +
-      minimumToolCalls * toolCallReserveCredits
+      minimumToolCalls * TOOL_CALL_RESERVE_CREDITS
+
+    const requestedReservationCredits =
+      fixedInputReserveCredits +
+      desiredOutputTokens +
+      desiredToolCalls * TOOL_CALL_RESERVE_CREDITS
 
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
@@ -2183,13 +2169,15 @@ export async function onRequestPost(
       data: reservationRows,
       error: reservationError,
     } = await supabaseAdmin.rpc(
-      'reserve_all_chat_credits_v1',
+      'reserve_chat_credits_v2',
       {
         p_user_id: authenticatedUserId,
         p_reservation_id: creditReservationId,
         p_model_id: resolvedModel.id,
         p_minimum_credits:
           minimumRequiredCredits,
+        p_requested_credits:
+          requestedReservationCredits,
         p_stale_timeout_seconds:
           CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS,
         p_description:
@@ -2251,7 +2239,7 @@ export async function onRequestPost(
             (
               variableBudgetCredits -
               MINIMUM_OUTPUT_TOKEN_BUDGET
-            ) / toolCallReserveCredits
+            ) / TOOL_CALL_RESERVE_CREDITS
           )
         )
       )
@@ -2275,7 +2263,7 @@ export async function onRequestPost(
     }
 
     const toolReserveCredits =
-      allowedToolCalls * toolCallReserveCredits
+      allowedToolCalls * TOOL_CALL_RESERVE_CREDITS
 
     const allowedOutputTokens = Math.min(
       desiredOutputTokens,
