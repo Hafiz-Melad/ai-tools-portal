@@ -34,6 +34,11 @@ type Profile = {
   credits: number
 }
 
+type RawProfile = {
+  full_name: unknown
+  credits: unknown
+}
+
 type AIModel = {
   id: string
   name: string
@@ -561,20 +566,46 @@ function normalizeModelRelation(
   return (value as AIModel | null) ?? null
 }
 
-function getInitials(fullName: string): string {
-  const parts = fullName
-    .trim()
+function normalizeDisplayName(
+  value: unknown,
+  email?: string | null
+): string {
+  if (typeof value === 'string') {
+    const cleanedValue = value.trim()
+
+    if (cleanedValue) {
+      return cleanedValue
+    }
+  }
+
+  const emailName =
+    email?.split('@')[0]?.trim() || ''
+
+  return emailName || 'Customer'
+}
+
+function normalizeCredits(value: unknown): number {
+  const parsedValue = Number(value)
+
+  if (
+    !Number.isFinite(parsedValue) ||
+    parsedValue < 0
+  ) {
+    return 0
+  }
+
+  return Math.floor(parsedValue)
+}
+
+function getInitials(fullName: unknown): string {
+  const parts = normalizeDisplayName(fullName)
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
 
-  if (parts.length === 0) {
-    return 'U'
-  }
-
   return parts
     .map((part) => part.charAt(0).toUpperCase())
-    .join('')
+    .join('') || 'U'
 }
 
 function formatConversationDate(value: string): string {
@@ -1598,11 +1629,16 @@ function Chat() {
       readyAttachments.length > 0
     )
 
-  const accessMessage = !hasCredits
-    ? 'No credits remain on this account. Contact the administrator to add credits.'
-    : !subscriptionIsActive
-      ? 'This Claude subscription is inactive.'
-      : null
+  const accessMessage =
+    bootstrapLoading ||
+    creditsRemaining === null ||
+    subscriptionStatus === null
+      ? null
+      : !hasCredits
+        ? 'No credits remain on this account. Contact the administrator to add credits.'
+        : !subscriptionIsActive
+          ? 'This Claude subscription is inactive.'
+          : null
 
   useEffect(() => {
     return () => {
@@ -1789,12 +1825,33 @@ function Chat() {
           return
         }
 
-        setProfile(profileResult.data)
+        const rawProfile =
+          profileResult.data as RawProfile
+
+        const normalizedProfile: Profile = {
+          full_name: normalizeDisplayName(
+            rawProfile.full_name,
+            user.email
+          ),
+          credits: normalizeCredits(
+            rawProfile.credits
+          ),
+        }
+
+        if (availableModels.length === 0) {
+          throw new Error(
+            'No Claude models are available for this account.'
+          )
+        }
+
+        setProfile(normalizedProfile)
         setCreditsRemaining(
-          profileResult.data.credits
+          normalizedProfile.credits
         )
         setSubscriptionStatus(
-          subscription.status
+          typeof subscription.status === 'string'
+            ? subscription.status
+            : 'inactive'
         )
         setModels(availableModels)
         setActiveModelId(defaultModel?.id ?? '')
@@ -3483,7 +3540,7 @@ function Chat() {
     activeModel?.name.replace(
       /^Claude\s+/i,
       ''
-    ) || 'Claude'
+    ) || 'Loading model'
 
   const pageTitle =
     conversationTitle?.trim() ||
