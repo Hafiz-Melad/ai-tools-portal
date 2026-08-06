@@ -252,9 +252,10 @@ const allowedOrigins = [
 
 /*
  * One customer credit represents one token reported by Perplexity.
- * Credits are deducted from usage.total_tokens, with an
- * input_tokens + output_tokens fallback.
+ * Separately billed provider features are converted to credits using
+ * the worst-case Claude rate: $1 equals 40,000 credits.
  */
+const EXTRA_FEATURE_CREDITS_PER_USD = 40_000
 
 const CHAT_RATE_LIMIT_MAX_REQUESTS = 8
 const CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -2338,9 +2339,79 @@ export async function onRequestPost(
           )
         }
 
-        const creditsUsed = Math.ceil(
+        const usageCost =
+          completedResponse?.usage?.cost
+
+        const inputCostUsd = Number(
+          usageCost?.input_cost ?? 0
+        )
+        const outputCostUsd = Number(
+          usageCost?.output_cost ?? 0
+        )
+        const cacheCreationCostUsd = Number(
+          usageCost?.cache_creation_cost ?? 0
+        )
+        const cacheReadCostUsd = Number(
+          usageCost?.cache_read_cost ?? 0
+        )
+        const reportedToolCallsCostUsd = Number(
+          usageCost?.tool_calls_cost ?? 0
+        )
+
+        const costParts = [
+          inputCostUsd,
+          outputCostUsd,
+          cacheCreationCostUsd,
+          cacheReadCostUsd,
+          reportedToolCallsCostUsd,
+        ]
+
+        if (
+          costParts.some(
+            (cost) =>
+              !Number.isFinite(cost) || cost < 0
+          )
+        ) {
+          throw new Error(
+            'The AI provider returned invalid detailed cost information.'
+          )
+        }
+
+        const modelAndCacheCostUsd =
+          inputCostUsd +
+          outputCostUsd +
+          cacheCreationCostUsd +
+          cacheReadCostUsd
+
+        const inferredExtraFeatureCostUsd =
+          Math.max(
+            0,
+            providerCostUsd - modelAndCacheCostUsd
+          )
+
+        /*
+         * Prefer the provider's explicit tool charge. The inferred
+         * fallback also catches any future non-token fee included in
+         * total_cost but not exposed under tool_calls_cost.
+         */
+        const extraFeatureCostUsd = Math.max(
+          reportedToolCallsCostUsd,
+          inferredExtraFeatureCostUsd > 0.000000001
+            ? inferredExtraFeatureCostUsd
+            : 0
+        )
+
+        const tokenCreditsUsed = Math.ceil(
           totalTokensUsed
         )
+
+        const featureCreditsUsed = Math.ceil(
+          extraFeatureCostUsd *
+            EXTRA_FEATURE_CREDITS_PER_USD
+        )
+
+        const creditsUsed =
+          tokenCreditsUsed + featureCreditsUsed
 
         const {
           data: creditRows,
@@ -2358,7 +2429,7 @@ export async function onRequestPost(
                   : resolvedResponseMode === 'web_search'
                     ? 'Web Search'
                     : 'Chat'
-              } usage — ${creditsUsed.toLocaleString()} tokens — $${providerCostUsd.toFixed(6)}`,
+              } usage — ${tokenCreditsUsed.toLocaleString()} token credits + ${featureCreditsUsed.toLocaleString()} feature credits — $${providerCostUsd.toFixed(6)}`,
           }
         )
 
