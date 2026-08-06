@@ -30,8 +30,6 @@ const allowedOrigins = [
   'https://ai-tools-portal-9h5.pages.dev',
 ]
 
-const MAX_INITIAL_CREDITS = 1_000_000
-
 function requireEnv(
   value: string | undefined,
   variableName: string
@@ -249,15 +247,14 @@ export async function onRequestPost(
     if (
       typeof credits !== 'number' ||
       !Number.isInteger(credits) ||
-      credits < 0 ||
-      credits > MAX_INITIAL_CREDITS
+      credits < 0
     ) {
       return jsonResponse(
         context.request,
         {
           success: false,
           error:
-            'Initial credits must be a whole number from 0 to 1,000,000.',
+            'Initial credits must be a non-negative whole number.',
         },
         400
       )
