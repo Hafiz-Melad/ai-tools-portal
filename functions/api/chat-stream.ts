@@ -31,8 +31,21 @@ type ChatRequest = {
   reasoningEffort?: unknown
 }
 
-type CreditResult = {
+type CreditReservationResult = {
   success: boolean
+  reservation_status: string
+  reserved_credits: number
+  credits_remaining: number
+  error_message: string | null
+}
+
+type CreditSettlementResult = {
+  success: boolean
+  reservation_status: string
+  reserved_credits: number
+  actual_credits: number
+  charged_credits: number
+  uncovered_credits: number
   credits_remaining: number
 }
 
@@ -107,6 +120,7 @@ type AgentTool =
   | {
       type: 'web_search'
       search_context_size?: 'low' | 'medium' | 'high'
+      max_tokens_per_page?: number
     }
   | {
       type: 'fetch_url'
@@ -116,6 +130,7 @@ type AgentRequestBody = {
   model: string
   input: string | AgentInputMessage[]
   max_output_tokens: number
+  max_tool_calls?: number
   stream: boolean
   store: boolean
   previous_response_id?: string
@@ -256,6 +271,26 @@ const allowedOrigins = [
  * the worst-case Claude rate: $1 equals 40,000 credits.
  */
 const EXTRA_FEATURE_CREDITS_PER_USD = 40_000
+
+/*
+ * Abuse protection uses an atomic reservation before the provider call.
+ * The complete available balance is temporarily reserved, then the exact
+ * provider-reported amount is settled and the unused portion is refunded.
+ */
+const CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS = 24 * 60 * 60
+const MAX_TRANSCRIPT_MESSAGES = 40
+const MAX_TRANSCRIPT_CHARACTERS = 80_000
+const IMAGE_INPUT_RESERVE_CREDITS = 20_000
+const CHAT_HIDDEN_INPUT_RESERVE_CREDITS = 4_000
+const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 12_000
+const RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS = 30_000
+const TOOL_CALL_RESERVE_CREDITS = 12_200
+const MAX_TOOL_FEE_CREDITS = 200
+const MINIMUM_OUTPUT_TOKEN_BUDGET = 200
+const WEB_MAX_TOOL_CALLS = 3
+const WEB_MAX_STEPS = 3
+const SEARCH_MAX_TOKENS_PER_PAGE = 1_024
+const CANCELLATION_OUTPUT_RESERVE_FRACTION = 0.25
 
 const CHAT_RATE_LIMIT_MAX_REQUESTS = 8
 const CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -748,34 +783,119 @@ function toAgentTranscript(
   messages: ConversationMessage[],
   newUserContent: string | AgentInputContent[]
 ): AgentInputMessage[] {
-  const transcript: AgentInputMessage[] = []
+  const normalizedMessages = messages
+    .filter(
+      (savedMessage) =>
+        savedMessage.role === 'user' ||
+        savedMessage.role === 'assistant'
+    )
+    .map((savedMessage) => ({
+      role: savedMessage.role as 'user' | 'assistant',
+      content: savedMessage.content?.trim() ?? '',
+    }))
+    .filter((savedMessage) => savedMessage.content)
+    .slice(-MAX_TRANSCRIPT_MESSAGES)
 
-  for (const savedMessage of messages) {
-    if (
-      savedMessage.role !== 'user' &&
-      savedMessage.role !== 'assistant'
-    ) {
-      continue
-    }
+  const selectedMessages: AgentInputMessage[] = []
+  let remainingCharacters = MAX_TRANSCRIPT_CHARACTERS
 
-    const content = savedMessage.content?.trim()
+  for (
+    let index = normalizedMessages.length - 1;
+    index >= 0 && remainingCharacters > 0;
+    index -= 1
+  ) {
+    const savedMessage = normalizedMessages[index]
+    const content = savedMessage.content.slice(
+      -remainingCharacters
+    )
 
     if (!content) {
       continue
     }
 
-    transcript.push({
+    selectedMessages.unshift({
       role: savedMessage.role,
       content,
     })
+
+    remainingCharacters -= content.length
   }
 
-  transcript.push({
+  selectedMessages.push({
     role: 'user',
     content: newUserContent,
   })
 
-  return transcript
+  return selectedMessages
+}
+
+function getUtf8ByteLength(value: unknown): number {
+  return new TextEncoder().encode(
+    typeof value === 'string'
+      ? value
+      : JSON.stringify(value)
+  ).byteLength
+}
+
+function getModeHiddenInputReserve(
+  responseMode: ResponseMode
+): number {
+  if (responseMode === 'research') {
+    return RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS
+  }
+
+  if (responseMode === 'web_search') {
+    return WEB_HIDDEN_INPUT_RESERVE_CREDITS
+  }
+
+  return CHAT_HIDDEN_INPUT_RESERVE_CREDITS
+}
+
+function getDesiredOutputTokens(
+  responseMode: ResponseMode
+): number {
+  if (responseMode === 'research') {
+    return 4_000
+  }
+
+  if (responseMode === 'web_search') {
+    return 1_800
+  }
+
+  return 600
+}
+
+function getDesiredToolCalls(
+  responseMode: ResponseMode,
+  reasoningEffort: ReasoningEffort
+): number {
+  if (responseMode === 'web_search') {
+    return WEB_MAX_TOOL_CALLS
+  }
+
+  if (responseMode !== 'research') {
+    return 0
+  }
+
+  return reasoningEffort === 'low'
+    ? 4
+    : reasoningEffort === 'medium'
+      ? 7
+      : 10
+}
+
+function getMinimumToolCalls(
+  responseMode: ResponseMode
+): number {
+  if (responseMode === 'research') {
+    return 2
+  }
+
+  if (responseMode === 'web_search') {
+    return 1
+  }
+
+  return 0
 }
 
 function escapeDocumentLabel(value: string): string {
@@ -927,6 +1047,16 @@ export async function onRequestPost(
     | (() => Promise<void>)
     | null = null
 
+  let releaseCreditReservation:
+    | (() => Promise<void>)
+    | null = null
+
+  let settleAmbiguousProviderRequest:
+    | (() => Promise<void>)
+    | null = null
+
+  let providerRequestStarted = false
+
   try {
     const perplexityKey = requireEnv(
       context.env.PERPLEXITY_API_KEY,
@@ -1042,6 +1172,122 @@ export async function onRequestPost(
           releaseError.message
         )
       }
+    }
+
+    let creditReservationId: string | null = null
+    let creditReservationActive = false
+    let reservedCredits = 0
+    let cancellationChargeCredits = 1
+
+    releaseCreditReservation = async (): Promise<void> => {
+      if (
+        !creditReservationActive ||
+        !creditReservationId
+      ) {
+        return
+      }
+
+      const reservationIdToRelease =
+        creditReservationId
+
+      creditReservationActive = false
+      creditReservationId = null
+
+      const { error: releaseError } =
+        await supabaseAdmin.rpc(
+          'release_chat_credit_reservation_v1',
+          {
+            p_user_id: authenticatedUserId,
+            p_reservation_id:
+              reservationIdToRelease,
+            p_description:
+              'Provider request did not begin billing.',
+          }
+        )
+
+      if (releaseError) {
+        console.error(
+          'CHAT CREDIT RESERVATION RELEASE ERROR:',
+          releaseError.message
+        )
+      }
+    }
+
+    async function settleReservedCredits(
+      actualCredits: number,
+      providerCostUsd: number,
+      description: string
+    ): Promise<CreditSettlementResult> {
+      if (
+        !creditReservationActive ||
+        !creditReservationId
+      ) {
+        throw new Error(
+          'The credit reservation is no longer active.'
+        )
+      }
+
+      const reservationIdToSettle =
+        creditReservationId
+
+      /*
+       * Never auto-refund after provider usage has begun merely because
+       * settlement transport fails. The database operation is idempotent,
+       * so retry it before surfacing an error.
+       */
+      creditReservationActive = false
+      creditReservationId = null
+
+      let lastSettlementError: string | null = null
+
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const {
+          data: settlementRows,
+          error: settlementError,
+        } = await supabaseAdmin.rpc(
+          'settle_chat_credit_reservation_v1',
+          {
+            p_user_id: authenticatedUserId,
+            p_reservation_id:
+              reservationIdToSettle,
+            p_actual_credits: Math.max(
+              1,
+              Math.ceil(actualCredits)
+            ),
+            p_provider_cost_usd:
+              Math.max(0, providerCostUsd),
+            p_description: description,
+          }
+        )
+
+        if (!settlementError) {
+          const settlementResult = (
+            Array.isArray(settlementRows)
+              ? settlementRows[0]
+              : settlementRows
+          ) as CreditSettlementResult | null
+
+          if (!settlementResult?.success) {
+            throw new Error(
+              'The credit reservation could not be settled.'
+            )
+          }
+
+          return settlementResult
+        }
+
+        lastSettlementError = settlementError.message
+
+        if (attempt < 3) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, attempt * 150)
+          )
+        }
+      }
+
+      throw new Error(
+        `Could not settle reserved credits: ${lastSettlementError ?? 'unknown database error'}`
+      )
     }
 
     let requestBody: ChatRequest
@@ -1391,39 +1637,35 @@ export async function onRequestPost(
       modelSwitched =
         conversation.model_id !== resolvedModel.id
 
-      if (
-        !modelSwitched &&
-        typeof conversation.provider_response_id ===
-          'string' &&
-        conversation.provider_response_id.trim()
-      ) {
-        previousResponseId =
-          conversation.provider_response_id.trim()
-      } else {
-        const {
-          data: messageRows,
-          error: transcriptError,
-        } = await supabaseAdmin
-          .from('messages')
-          .select('role, content, created_at')
-          .eq(
-            'conversation_id',
-            requestedConversationId
-          )
-          .in('role', ['user', 'assistant'])
-          .order('created_at', {
-            ascending: true,
-          })
+      /*
+       * Always rebuild a bounded local transcript instead of relying on
+       * provider-side hidden continuity. This makes the billable input
+       * measurable and prevents an old provider response from silently
+       * carrying an unbounded context into a low-balance request.
+       */
+      const {
+        data: messageRows,
+        error: transcriptError,
+      } = await supabaseAdmin
+        .from('messages')
+        .select('role, content, created_at')
+        .eq(
+          'conversation_id',
+          requestedConversationId
+        )
+        .in('role', ['user', 'assistant'])
+        .order('created_at', {
+          ascending: true,
+        })
 
-        if (transcriptError) {
-          throw new Error(
-            `Could not load the conversation transcript: ${transcriptError.message}`
-          )
-        }
-
-        conversationMessages =
-          (messageRows ?? []) as ConversationMessage[]
+      if (transcriptError) {
+        throw new Error(
+          `Could not load the conversation transcript: ${transcriptError.message}`
+        )
       }
+
+      conversationMessages =
+        (messageRows ?? []) as ConversationMessage[]
     }
 
     let signedImageUrls: string[] = []
@@ -1769,15 +2011,35 @@ export async function onRequestPost(
               ]
             : message
 
+    const desiredOutputTokens =
+      getDesiredOutputTokens(resolvedResponseMode)
+
+    const desiredToolCalls = getDesiredToolCalls(
+      resolvedResponseMode,
+      resolvedReasoningEffort
+    )
+
+    const minimumToolCalls =
+      getMinimumToolCalls(resolvedResponseMode)
+
+    const fixedInputReserveCredits =
+      getUtf8ByteLength(agentInput) +
+      getModeHiddenInputReserve(
+        resolvedResponseMode
+      ) +
+      signedImageUrls.length *
+        IMAGE_INPUT_RESERVE_CREDITS
+
+    const minimumRequiredCredits =
+      fixedInputReserveCredits +
+      MINIMUM_OUTPUT_TOKEN_BUDGET +
+      minimumToolCalls * TOOL_CALL_RESERVE_CREDITS
+
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
       input: agentInput,
       max_output_tokens:
-        resolvedResponseMode === 'research'
-          ? 4000
-          : resolvedResponseMode === 'web_search'
-            ? 1800
-            : 600,
+        MINIMUM_OUTPUT_TOKEN_BUDGET,
       stream: true,
       store: false,
       reasoning: {
@@ -1793,6 +2055,8 @@ export async function onRequestPost(
         {
           type: 'web_search',
           search_context_size: 'medium',
+          max_tokens_per_page:
+            SEARCH_MAX_TOKENS_PER_PAGE,
         },
         {
           type: 'fetch_url',
@@ -1802,17 +2066,6 @@ export async function onRequestPost(
       agentRequestBody.preset = 'high'
       agentRequestBody.instructions =
         RESEARCH_INSTRUCTIONS
-      agentRequestBody.max_steps =
-        resolvedReasoningEffort === 'low'
-          ? 4
-          : resolvedReasoningEffort === 'medium'
-            ? 7
-            : 10
-    }
-
-    if (previousResponseId) {
-      agentRequestBody.previous_response_id =
-        previousResponseId
     }
 
     /*
@@ -1904,11 +2157,192 @@ export async function onRequestPost(
 
     chatRequestSlotAcquired = true
 
+    creditReservationId = crypto.randomUUID()
+
+    const {
+      data: reservationRows,
+      error: reservationError,
+    } = await supabaseAdmin.rpc(
+      'reserve_all_chat_credits_v1',
+      {
+        p_user_id: authenticatedUserId,
+        p_reservation_id: creditReservationId,
+        p_model_id: resolvedModel.id,
+        p_minimum_credits:
+          minimumRequiredCredits,
+        p_stale_timeout_seconds:
+          CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS,
+        p_description:
+          `${resolvedModel.name} ${resolvedResponseMode} request reservation`,
+      }
+    )
+
+    if (reservationError) {
+      await releaseChatRequestSlot()
+
+      throw new Error(
+        `Could not reserve credits: ${reservationError.message}`
+      )
+    }
+
+    const reservationResult = (
+      Array.isArray(reservationRows)
+        ? reservationRows[0]
+        : reservationRows
+    ) as CreditReservationResult | null
+
+    if (!reservationResult?.success) {
+      await releaseChatRequestSlot()
+      creditReservationId = null
+
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            reservationResult?.error_message ||
+            'There are not enough available credits for this request.',
+          reason:
+            reservationResult?.reservation_status ||
+            'insufficient_credits',
+          creditsRemaining:
+            reservationResult?.credits_remaining ?? 0,
+          minimumRequiredCredits,
+        },
+        402
+      )
+    }
+
+    reservedCredits =
+      reservationResult.reserved_credits
+    creditReservationActive = true
+
+    const variableBudgetCredits =
+      reservedCredits - fixedInputReserveCredits
+
+    let allowedToolCalls = 0
+
+    if (desiredToolCalls > 0) {
+      allowedToolCalls = Math.min(
+        desiredToolCalls,
+        Math.max(
+          0,
+          Math.floor(
+            (
+              variableBudgetCredits -
+              MINIMUM_OUTPUT_TOKEN_BUDGET
+            ) / TOOL_CALL_RESERVE_CREDITS
+          )
+        )
+      )
+    }
+
+    if (allowedToolCalls < minimumToolCalls) {
+      await releaseCreditReservation()
+      await releaseChatRequestSlot()
+
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            `This ${resolvedResponseMode.replace('_', ' ')} request requires at least ${minimumRequiredCredits.toLocaleString()} available credits.`,
+          reason: 'insufficient_credits',
+          minimumRequiredCredits,
+        },
+        402
+      )
+    }
+
+    const toolReserveCredits =
+      allowedToolCalls * TOOL_CALL_RESERVE_CREDITS
+
+    const allowedOutputTokens = Math.min(
+      desiredOutputTokens,
+      Math.max(
+        0,
+        variableBudgetCredits - toolReserveCredits
+      )
+    )
+
+    if (
+      allowedOutputTokens <
+      MINIMUM_OUTPUT_TOKEN_BUDGET
+    ) {
+      await releaseCreditReservation()
+      await releaseChatRequestSlot()
+
+      return jsonResponse(
+        context.request,
+        {
+          success: false,
+          error:
+            `At least ${minimumRequiredCredits.toLocaleString()} available credits are required for this request.`,
+          reason: 'insufficient_credits',
+          minimumRequiredCredits,
+        },
+        402
+      )
+    }
+
+    agentRequestBody.max_output_tokens =
+      Math.floor(allowedOutputTokens)
+
+    if (allowedToolCalls > 0) {
+      agentRequestBody.max_tool_calls =
+        allowedToolCalls
+      agentRequestBody.max_steps =
+        resolvedResponseMode === 'web_search'
+          ? Math.min(
+              WEB_MAX_STEPS,
+              allowedToolCalls
+            )
+          : allowedToolCalls
+    }
+
+    cancellationChargeCredits = Math.min(
+      reservedCredits,
+      Math.max(
+        1,
+        Math.ceil(
+          fixedInputReserveCredits +
+          allowedOutputTokens *
+            CANCELLATION_OUTPUT_RESERVE_FRACTION +
+          allowedToolCalls *
+            MAX_TOOL_FEE_CREDITS
+        )
+      )
+    )
+
+    settleAmbiguousProviderRequest =
+      async (): Promise<void> => {
+        if (!creditReservationActive) {
+          return
+        }
+
+        try {
+          await settleReservedCredits(
+            cancellationChargeCredits,
+            0,
+            `${resolvedModel.name} ${resolvedResponseMode} request — provider request started but exact final usage was unavailable`
+          )
+        } catch (settlementError) {
+          console.error(
+            'AMBIGUOUS PROVIDER REQUEST SETTLEMENT ERROR:',
+            settlementError instanceof Error
+              ? settlementError.message
+              : settlementError
+          )
+        }
+      }
+
     /*
      * Contact the provider before opening the client stream.
      * Validation and provider-level HTTP errors remain normal JSON
      * responses, while successful generations become NDJSON streams.
      */
+    providerRequestStarted = true
+
     const perplexityResponse = await fetch(
       'https://api.perplexity.ai/v1/agent',
       {
@@ -1946,6 +2380,8 @@ export async function onRequestPost(
         }
       }
 
+      providerRequestStarted = false
+      await releaseCreditReservation()
       await releaseChatRequestSlot()
 
       return jsonResponse(
@@ -1960,6 +2396,7 @@ export async function onRequestPost(
     }
 
     if (!perplexityResponse.body) {
+      await settleAmbiguousProviderRequest?.()
       await releaseChatRequestSlot()
 
       return jsonResponse(
@@ -2389,11 +2826,6 @@ export async function onRequestPost(
             providerCostUsd - modelAndCacheCostUsd
           )
 
-        /*
-         * Prefer the provider's explicit tool charge. The inferred
-         * fallback also catches any future non-token fee included in
-         * total_cost but not exposed under tool_calls_cost.
-         */
         const extraFeatureCostUsd = Math.max(
           reportedToolCallsCostUsd,
           inferredExtraFeatureCostUsd > 0.000000001
@@ -2410,46 +2842,53 @@ export async function onRequestPost(
             EXTRA_FEATURE_CREDITS_PER_USD
         )
 
-        const creditsUsed =
-          tokenCreditsUsed + featureCreditsUsed
-
-        const {
-          data: creditRows,
-          error: creditError,
-        } = await supabaseAdmin.rpc(
-          'consume_credits',
-          {
-            p_user_id: authenticatedUserId,
-            p_amount: creditsUsed,
-            p_model_id: resolvedModel.id,
-            p_description:
-              `${resolvedModel.name} ${
-                resolvedResponseMode === 'research'
-                  ? 'Research'
-                  : resolvedResponseMode === 'web_search'
-                    ? 'Web Search'
-                    : 'Chat'
-              } usage — ${tokenCreditsUsed.toLocaleString()} token credits + ${featureCreditsUsed.toLocaleString()} feature credits — $${providerCostUsd.toFixed(6)}`,
-          }
+        /*
+         * The full-cost equivalent is a final catch-all for cache fees,
+         * future provider fees, or any cost field not broken out by the API.
+         * At the worst-case Claude rate, $1 equals 40,000 credits.
+         */
+        const fullCostEquivalentCredits = Math.ceil(
+          providerCostUsd *
+            EXTRA_FEATURE_CREDITS_PER_USD
         )
 
-        if (creditError) {
-          throw new Error(
-            `Could not deduct credits: ${creditError.message}`
+        const creditsUsed = Math.max(
+          tokenCreditsUsed + featureCreditsUsed,
+          fullCostEquivalentCredits,
+          1
+        )
+
+        const settlementResult =
+          await settleReservedCredits(
+            creditsUsed,
+            providerCostUsd,
+            `${resolvedModel.name} ${
+              resolvedResponseMode === 'research'
+                ? 'Research'
+                : resolvedResponseMode === 'web_search'
+                  ? 'Web Search'
+                  : 'Chat'
+            } usage — ${tokenCreditsUsed.toLocaleString()} token credits + ${featureCreditsUsed.toLocaleString()} feature credits — full-cost floor ${fullCostEquivalentCredits.toLocaleString()} credits — $${providerCostUsd.toFixed(6)}`
+          )
+
+        if (settlementResult.uncovered_credits > 0) {
+          console.error(
+            'CHAT CREDIT SHORTFALL:',
+            {
+              userId: authenticatedUserId,
+              reservationId:
+                settlementResult.reservation_status,
+              uncoveredCredits:
+                settlementResult.uncovered_credits,
+              actualCredits: creditsUsed,
+              reservedCredits:
+                settlementResult.reserved_credits,
+            }
           )
         }
 
-        const creditResult = (
-          Array.isArray(creditRows)
-            ? creditRows[0]
-            : creditRows
-        ) as CreditResult | null
-
-        if (!creditResult?.success) {
-          throw new Error(
-            'Your remaining balance is insufficient for this request.'
-          )
-        }
+        const creditsRemaining =
+          settlementResult.credits_remaining
 
         const {
           data: savedExchangeData,
@@ -2503,8 +2942,7 @@ export async function onRequestPost(
             completedResponse?.usage ?? null,
           providerCostUsd,
           creditsUsed,
-          creditsRemaining:
-            creditResult.credits_remaining,
+          creditsRemaining,
           responseMode: resolvedResponseMode,
           sources: searchSources,
         })
@@ -2513,6 +2951,7 @@ export async function onRequestPost(
           error instanceof
           ClientGenerationStoppedError
         ) {
+          await settleAmbiguousProviderRequest?.()
           return
         }
 
@@ -2526,10 +2965,16 @@ export async function onRequestPost(
           errorMessage
         )
 
-        await sendClientEvent({
-          type: 'error',
-          error: errorMessage,
-        })
+        await settleAmbiguousProviderRequest?.()
+
+        try {
+          await sendClientEvent({
+            type: 'error',
+            error: errorMessage,
+          })
+        } catch {
+          // The client may already have disconnected.
+        }
       } finally {
         providerReader = null
 
@@ -2553,6 +2998,12 @@ export async function onRequestPost(
       headers: getStreamHeaders(context.request),
     })
   } catch (error) {
+    if (providerRequestStarted) {
+      await settleAmbiguousProviderRequest?.()
+    } else {
+      await releaseCreditReservation?.()
+    }
+
     await releaseChatRequestSlot?.()
 
     const message =
