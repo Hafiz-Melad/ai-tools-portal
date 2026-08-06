@@ -279,8 +279,19 @@ const EXTRA_FEATURE_CREDITS_PER_USD = 40_000
  * become recoverable after 15 minutes.
  */
 const CHAT_CREDIT_RESERVATION_TIMEOUT_SECONDS = 15 * 60
-const MAX_TRANSCRIPT_MESSAGES = 40
-const MAX_TRANSCRIPT_CHARACTERS = 80_000
+
+/*
+ * Only a compact rolling window is resent on follow-up messages. Large code
+ * blocks remain fully available in the saved chat, but historical copies are
+ * clipped before they are sent to the provider again. This prevents a short
+ * follow-up from repeatedly paying for an entire long coding conversation.
+ */
+const MAX_TRANSCRIPT_MESSAGES = 6
+const MAX_TRANSCRIPT_CHARACTERS = 8_000
+const MAX_TRANSCRIPT_CHARACTERS_PER_MESSAGE = 2_000
+const TRANSCRIPT_TRUNCATION_MARKER =
+  '\n\n[Earlier message content truncated to control repeated context usage.]\n\n'
+
 const IMAGE_INPUT_RESERVE_CREDITS = 20_000
 const CHAT_HIDDEN_INPUT_RESERVE_CREDITS = 4_000
 const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 12_000
@@ -780,6 +791,38 @@ function extractAgentText(
   return textParts.join('\n\n')
 }
 
+function compactTranscriptContent(
+  content: string,
+  maximumCharacters: number
+): string {
+  if (content.length <= maximumCharacters) {
+    return content
+  }
+
+  if (
+    maximumCharacters <=
+    TRANSCRIPT_TRUNCATION_MARKER.length + 40
+  ) {
+    return content.slice(-maximumCharacters)
+  }
+
+  const availableCharacters =
+    maximumCharacters -
+    TRANSCRIPT_TRUNCATION_MARKER.length
+
+  const leadingCharacters = Math.ceil(
+    availableCharacters * 0.6
+  )
+  const trailingCharacters =
+    availableCharacters - leadingCharacters
+
+  return (
+    content.slice(0, leadingCharacters) +
+    TRANSCRIPT_TRUNCATION_MARKER +
+    content.slice(-trailingCharacters)
+  )
+}
+
 function toAgentTranscript(
   messages: ConversationMessage[],
   newUserContent: string | AgentInputContent[]
@@ -806,8 +849,14 @@ function toAgentTranscript(
     index -= 1
   ) {
     const savedMessage = normalizedMessages[index]
-    const content = savedMessage.content.slice(
-      -remainingCharacters
+    const messageBudget = Math.min(
+      MAX_TRANSCRIPT_CHARACTERS_PER_MESSAGE,
+      remainingCharacters
+    )
+
+    const content = compactTranscriptContent(
+      savedMessage.content,
+      messageBudget
     )
 
     if (!content) {
@@ -830,12 +879,23 @@ function toAgentTranscript(
   return selectedMessages
 }
 
-function getUtf8ByteLength(value: unknown): number {
-  return new TextEncoder().encode(
+function estimateInputTokenCredits(value: unknown): number {
+  const serializedValue =
     typeof value === 'string'
       ? value
       : JSON.stringify(value)
+
+  const utf8Bytes = new TextEncoder().encode(
+    serializedValue
   ).byteLength
+
+  /*
+   * Code and ordinary prose are generally several UTF-8 bytes per token.
+   * Dividing by three is deliberately conservative while avoiding the old
+   * one-credit-per-byte reservation that made balances appear to drop far
+   * more than the eventual provider usage.
+   */
+  return Math.max(1, Math.ceil(utf8Bytes / 3))
 }
 
 function getModeHiddenInputReserve(
@@ -2024,7 +2084,7 @@ export async function onRequestPost(
       getMinimumToolCalls(resolvedResponseMode)
 
     const fixedInputReserveCredits =
-      getUtf8ByteLength(agentInput) +
+      estimateInputTokenCredits(agentInput) +
       getModeHiddenInputReserve(
         resolvedResponseMode
       ) +
