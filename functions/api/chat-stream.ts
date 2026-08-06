@@ -251,10 +251,10 @@ const allowedOrigins = [
 ]
 
 /*
- * 10,000 customer credits represent $1 of API usage.
- * One credit represents $0.0001.
+ * One customer credit represents one token reported by Perplexity.
+ * Credits are deducted from usage.total_tokens, with an
+ * input_tokens + output_tokens fallback.
  */
-const CREDITS_PER_USD = 10_000
 
 const CHAT_RATE_LIMIT_MAX_REQUESTS = 8
 const CHAT_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -2308,11 +2308,38 @@ export async function onRequestPost(
           )
         }
 
-        const creditsUsed = Math.max(
-          1,
-          Math.ceil(
-            providerCostUsd * CREDITS_PER_USD
+        const reportedTotalTokens = Number(
+          completedResponse?.usage?.total_tokens
+        )
+
+        const inputTokens = Number(
+          completedResponse?.usage?.input_tokens ?? 0
+        )
+
+        const outputTokens = Number(
+          completedResponse?.usage?.output_tokens ?? 0
+        )
+
+        const fallbackTotalTokens =
+          inputTokens + outputTokens
+
+        const totalTokensUsed =
+          Number.isFinite(reportedTotalTokens) &&
+          reportedTotalTokens > 0
+            ? reportedTotalTokens
+            : fallbackTotalTokens
+
+        if (
+          !Number.isFinite(totalTokensUsed) ||
+          totalTokensUsed <= 0
+        ) {
+          throw new Error(
+            'The AI provider returned invalid token-usage information.'
           )
+        }
+
+        const creditsUsed = Math.ceil(
+          totalTokensUsed
         )
 
         const {
@@ -2331,7 +2358,7 @@ export async function onRequestPost(
                   : resolvedResponseMode === 'web_search'
                     ? 'Web Search'
                     : 'Chat'
-              } usage — $${providerCostUsd.toFixed(6)}`,
+              } usage — ${creditsUsed.toLocaleString()} tokens — $${providerCostUsd.toFixed(6)}`,
           }
         )
 
