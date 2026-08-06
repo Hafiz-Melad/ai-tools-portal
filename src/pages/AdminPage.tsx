@@ -61,16 +61,6 @@ type DeleteCustomerApiResponse = {
   error?: string
 }
 
-type SetSubscriptionStatusApiResponse = {
-  success: boolean
-  result?: {
-    customerUserId: string
-    previousStatus: string
-    subscriptionStatus: string
-  }
-  error?: string
-}
-
 const ADMIN_DELETE_USER_API_URL =
   '/api/admin-delete-user'
 
@@ -81,9 +71,6 @@ const ADMIN_CREATE_USER_API_URL =
 
 const ADMIN_ADJUST_CREDITS_API_URL =
   '/api/admin-adjust-credits'
-
-const ADMIN_SET_SUBSCRIPTION_STATUS_API_URL =
-  '/api/admin-set-subscription-status'
 
 function formatCreatedAt(value: string): string {
   const date = new Date(value)
@@ -134,16 +121,6 @@ function AdminPage() {
   >(null)
 
   const [deleteSuccess, setDeleteSuccess] =
-    useState<string | null>(null)
-
-  const [updatingStatusUserId, setUpdatingStatusUserId] =
-    useState<string | null>(null)
-
-  const [statusError, setStatusError] = useState<
-    string | null
-  >(null)
-
-  const [statusSuccess, setStatusSuccess] =
     useState<string | null>(null)
 
   const [accounts, setAccounts] = useState<
@@ -700,123 +677,6 @@ function AdminPage() {
     }
   }
 
-  async function handleSetSubscriptionStatus(
-    account: AdminAccount,
-    nextStatus: 'active' | 'inactive'
-  ): Promise<void> {
-    if (nextStatus === 'active' && account.credits <= 0) {
-      setStatusError(
-        'Add credits before activating this customer.'
-      )
-      setStatusSuccess(null)
-
-      return
-    }
-
-    try {
-      setUpdatingStatusUserId(account.id)
-      setStatusError(null)
-      setStatusSuccess(null)
-
-      const {
-        data: { session },
-        error: sessionError,
-      } = await supabase.auth.getSession()
-
-      if (sessionError) {
-        throw sessionError
-      }
-
-      if (!session) {
-        navigate('/login', {
-          replace: true,
-        })
-
-        return
-      }
-
-      const response = await fetch(
-        ADMIN_SET_SUBSCRIPTION_STATUS_API_URL,
-        {
-          method: 'POST',
-          headers: {
-            Authorization:
-              `Bearer ${session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            customerUserId: account.id,
-            status: nextStatus,
-          }),
-        }
-      )
-
-      const payload =
-        (await response.json()) as SetSubscriptionStatusApiResponse
-
-      if (
-        !response.ok ||
-        !payload.success ||
-        !payload.result
-      ) {
-        throw new Error(
-          payload.error ||
-            'Could not update the subscription status.'
-        )
-      }
-
-      const updatedStatus =
-        payload.result.subscriptionStatus
-
-      setAccounts((currentAccounts) =>
-        currentAccounts.map((currentAccount) =>
-          currentAccount.id === account.id
-            ? {
-                ...currentAccount,
-                subscriptionStatus: updatedStatus,
-              }
-            : currentAccount
-        )
-      )
-
-      setSelectedAdjustmentAccount(
-        (currentAccount) =>
-          currentAccount?.id === account.id
-            ? {
-                ...currentAccount,
-                subscriptionStatus: updatedStatus,
-              }
-            : currentAccount
-      )
-
-      setSelectedDeleteAccount((currentAccount) =>
-        currentAccount?.id === account.id
-          ? {
-              ...currentAccount,
-              subscriptionStatus: updatedStatus,
-            }
-          : currentAccount
-      )
-
-      const customerLabel =
-        account.email ?? 'Customer account'
-
-      setStatusSuccess(
-        `${customerLabel} is now ${updatedStatus}.`
-      )
-
-      await loadAccounts()
-    } catch (statusUpdateError) {
-      setStatusError(
-        statusUpdateError instanceof Error
-          ? statusUpdateError.message
-          : 'Could not update the subscription status.'
-      )
-    } finally {
-      setUpdatingStatusUserId(null)
-    }
-  }
-
   async function handleRefresh(): Promise<void> {
     setRefreshing(true)
     await loadAccounts()
@@ -869,8 +729,8 @@ function AdminPage() {
 
             <p className="mt-2 text-sm text-[#aaa49c]">
               Create customer logins, review
-              accounts, manage access, adjust credits,
-              and delete customer accounts.
+              accounts, adjust credits, and delete
+              customer accounts.
             </p>
           </div>
 
@@ -1270,24 +1130,6 @@ function AdminPage() {
           </div>
         )}
 
-        {statusError && (
-          <div
-            className="mb-6 rounded-2xl border border-red-900/60 bg-red-950/25 px-5 py-4 text-sm leading-6 text-red-200"
-            role="alert"
-          >
-            {statusError}
-          </div>
-        )}
-
-        {statusSuccess && (
-          <div
-            className="mb-6 rounded-2xl border border-emerald-900/60 bg-emerald-950/25 px-5 py-4 text-sm text-emerald-200"
-            role="status"
-          >
-            {statusSuccess}
-          </div>
-        )}
-
         <section className="overflow-hidden rounded-2xl border border-[#3a3936] bg-[#242421] shadow-[0_20px_70px_rgba(0,0,0,0.22)]">
           <div className="border-b border-[#3a3936] px-5 py-4">
             <h2 className="font-semibold text-[#eee9e1]">
@@ -1394,54 +1236,11 @@ function AdminPage() {
                             <button
                               type="button"
                               onClick={() => {
-                                void handleSetSubscriptionStatus(
-                                  account,
-                                  statusIsActive
-                                    ? 'inactive'
-                                    : 'active'
-                                )
-                              }}
-                              disabled={
-                                updatingStatusUserId ===
-                                  account.id ||
-                                (!statusIsActive &&
-                                  account.credits <= 0)
-                              }
-                              title={
-                                !statusIsActive &&
-                                account.credits <= 0
-                                  ? 'Add credits before activating this customer.'
-                                  : undefined
-                              }
-                              className={[
-                                'rounded-lg border px-3 py-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45',
-                                statusIsActive
-                                  ? 'border-amber-900/70 bg-amber-950/20 text-amber-300 hover:border-amber-700 hover:bg-amber-950/40'
-                                  : 'border-emerald-900/70 bg-emerald-950/20 text-emerald-300 hover:border-emerald-700 hover:bg-emerald-950/40',
-                              ].join(' ')}
-                            >
-                              {updatingStatusUserId ===
-                              account.id
-                                ? 'Updating...'
-                                : statusIsActive
-                                  ? 'Deactivate'
-                                  : account.credits <= 0
-                                    ? 'Add credits first'
-                                    : 'Activate'}
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
                                 openCreditAdjustment(
                                   account
                                 )
                               }}
-                              disabled={
-                                updatingStatusUserId ===
-                                account.id
-                              }
-                              className="rounded-lg border border-[#55514a] bg-[#2b2b28] px-3 py-2 text-xs font-medium text-[#ded8cf] transition hover:border-[#777169] hover:bg-[#32322f] disabled:cursor-not-allowed disabled:opacity-45"
+                              className="rounded-lg border border-[#55514a] bg-[#2b2b28] px-3 py-2 text-xs font-medium text-[#ded8cf] transition hover:border-[#777169] hover:bg-[#32322f]"
                             >
                               Adjust credits
                             </button>
@@ -1451,11 +1250,7 @@ function AdminPage() {
                               onClick={() => {
                                 openDeleteAccount(account)
                               }}
-                              disabled={
-                                updatingStatusUserId ===
-                                account.id
-                              }
-                              className="rounded-lg border border-red-900/70 bg-red-950/20 px-3 py-2 text-xs font-medium text-red-300 transition hover:border-red-700 hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-45"
+                              className="rounded-lg border border-red-900/70 bg-red-950/20 px-3 py-2 text-xs font-medium text-red-300 transition hover:border-red-700 hover:bg-red-950/40"
                             >
                               Delete
                             </button>
