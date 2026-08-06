@@ -282,9 +282,10 @@ const MAX_TRANSCRIPT_MESSAGES = 40
 const MAX_TRANSCRIPT_CHARACTERS = 80_000
 const IMAGE_INPUT_RESERVE_CREDITS = 20_000
 const CHAT_HIDDEN_INPUT_RESERVE_CREDITS = 4_000
-const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 12_000
+const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 3_000
 const RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS = 30_000
-const TOOL_CALL_RESERVE_CREDITS = 12_200
+const WEB_TOOL_CALL_RESERVE_CREDITS = 2_000
+const RESEARCH_TOOL_CALL_RESERVE_CREDITS = 12_200
 const MAX_TOOL_FEE_CREDITS = 200
 const MINIMUM_OUTPUT_TOKEN_BUDGET = 200
 const WEB_MAX_TOOL_CALLS = 3
@@ -893,6 +894,20 @@ function getMinimumToolCalls(
 
   if (responseMode === 'web_search') {
     return 1
+  }
+
+  return 0
+}
+
+function getToolCallReserveCredits(
+  responseMode: ResponseMode
+): number {
+  if (responseMode === 'research') {
+    return RESEARCH_TOOL_CALL_RESERVE_CREDITS
+  }
+
+  if (responseMode === 'web_search') {
+    return WEB_TOOL_CALL_RESERVE_CREDITS
   }
 
   return 0
@@ -2022,6 +2037,11 @@ export async function onRequestPost(
     const minimumToolCalls =
       getMinimumToolCalls(resolvedResponseMode)
 
+    const toolCallReserveCredits =
+      getToolCallReserveCredits(
+        resolvedResponseMode
+      )
+
     const fixedInputReserveCredits =
       getUtf8ByteLength(agentInput) +
       getModeHiddenInputReserve(
@@ -2033,7 +2053,7 @@ export async function onRequestPost(
     const minimumRequiredCredits =
       fixedInputReserveCredits +
       MINIMUM_OUTPUT_TOKEN_BUDGET +
-      minimumToolCalls * TOOL_CALL_RESERVE_CREDITS
+      minimumToolCalls * toolCallReserveCredits
 
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
@@ -2231,7 +2251,7 @@ export async function onRequestPost(
             (
               variableBudgetCredits -
               MINIMUM_OUTPUT_TOKEN_BUDGET
-            ) / TOOL_CALL_RESERVE_CREDITS
+            ) / toolCallReserveCredits
           )
         )
       )
@@ -2255,7 +2275,7 @@ export async function onRequestPost(
     }
 
     const toolReserveCredits =
-      allowedToolCalls * TOOL_CALL_RESERVE_CREDITS
+      allowedToolCalls * toolCallReserveCredits
 
     const allowedOutputTokens = Math.min(
       desiredOutputTokens,
