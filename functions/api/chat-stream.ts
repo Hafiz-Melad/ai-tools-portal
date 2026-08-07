@@ -267,10 +267,18 @@ const allowedOrigins = [
 
 /*
  * Customer credits track actual provider spend.
- * 10,000 customer credits represent $1.00 of API usage.
- * One credit therefore represents $0.0001 of provider cost.
+ * 200,000 customer credits represent $1.00 of API usage.
+ * One credit therefore represents $0.000005 of provider cost.
  */
-const CREDITS_PER_USD = 10_000
+const CREDITS_PER_USD = 200_000
+
+/*
+ * Reservation heuristics were calibrated when 10,000 customer credits
+ * represented $1.00 of provider cost. Scale reservation-only credit amounts
+ * with the live denomination while keeping provider token limits unchanged.
+ */
+const RESERVATION_CREDIT_SCALE =
+  CREDITS_PER_USD / 10_000
 
 /*
  * Abuse protection uses a bounded atomic reservation before the provider
@@ -2081,23 +2089,41 @@ export async function onRequestPost(
     const minimumToolCalls =
       getMinimumToolCalls(resolvedResponseMode)
 
-    const fixedInputReserveCredits =
-      estimateInputTokenCredits(agentInput) +
-      getModeHiddenInputReserve(
-        resolvedResponseMode
-      ) +
-      signedImageUrls.length *
-        IMAGE_INPUT_RESERVE_CREDITS
+    const fixedInputReserveCredits = Math.ceil(
+      (
+        estimateInputTokenCredits(agentInput) +
+        getModeHiddenInputReserve(
+          resolvedResponseMode
+        ) +
+        signedImageUrls.length *
+          IMAGE_INPUT_RESERVE_CREDITS
+      ) * RESERVATION_CREDIT_SCALE
+    )
+
+    const minimumOutputReserveCredits = Math.ceil(
+      MINIMUM_OUTPUT_TOKEN_BUDGET *
+        RESERVATION_CREDIT_SCALE
+    )
+
+    const desiredOutputReserveCredits = Math.ceil(
+      desiredOutputTokens *
+        RESERVATION_CREDIT_SCALE
+    )
+
+    const perToolCallReserveCredits = Math.ceil(
+      TOOL_CALL_RESERVE_CREDITS *
+        RESERVATION_CREDIT_SCALE
+    )
 
     const minimumRequiredCredits =
       fixedInputReserveCredits +
-      MINIMUM_OUTPUT_TOKEN_BUDGET +
-      minimumToolCalls * TOOL_CALL_RESERVE_CREDITS
+      minimumOutputReserveCredits +
+      minimumToolCalls * perToolCallReserveCredits
 
     const requestedReservationCredits =
       fixedInputReserveCredits +
-      desiredOutputTokens +
-      desiredToolCalls * TOOL_CALL_RESERVE_CREDITS
+      desiredOutputReserveCredits +
+      desiredToolCalls * perToolCallReserveCredits
 
     const agentRequestBody: AgentRequestBody = {
       model: resolvedModel.model_key,
@@ -2296,8 +2322,8 @@ export async function onRequestPost(
           Math.floor(
             (
               variableBudgetCredits -
-              MINIMUM_OUTPUT_TOKEN_BUDGET
-            ) / TOOL_CALL_RESERVE_CREDITS
+              minimumOutputReserveCredits
+            ) / perToolCallReserveCredits
           )
         )
       )
@@ -2321,13 +2347,18 @@ export async function onRequestPost(
     }
 
     const toolReserveCredits =
-      allowedToolCalls * TOOL_CALL_RESERVE_CREDITS
+      allowedToolCalls * perToolCallReserveCredits
 
     const allowedOutputTokens = Math.min(
       desiredOutputTokens,
       Math.max(
         0,
-        variableBudgetCredits - toolReserveCredits
+        Math.floor(
+          (
+            variableBudgetCredits -
+            toolReserveCredits
+          ) / RESERVATION_CREDIT_SCALE
+        )
       )
     )
 
