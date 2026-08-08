@@ -273,12 +273,27 @@ const allowedOrigins = [
 const CREDITS_PER_USD = 200_000
 
 /*
- * Reservation heuristics were calibrated when 10,000 customer credits
- * represented $1.00 of provider cost. Scale reservation-only credit amounts
- * with the live denomination while keeping provider token limits unchanged.
+ * Reservations are expressed in the same customer-credit denomination as
+ * final settlement, but are estimated from model pricing rather than from a
+ * fixed token-to-credit multiplier. Final billing still uses the provider's
+ * exact reported total_cost.
  */
-const RESERVATION_CREDIT_SCALE =
-  CREDITS_PER_USD / 10_000
+type ReservationPricing = {
+  inputUsdPerMillionTokens: number
+  outputUsdPerMillionTokens: number
+}
+
+const DEFAULT_RESERVATION_PRICING: ReservationPricing = {
+  inputUsdPerMillionTokens: 10,
+  outputUsdPerMillionTokens: 50,
+}
+
+const WEB_SEARCH_RESERVE_USD = 0.005
+const FETCH_URL_RESERVE_USD = 0.0005
+const MAX_TOOL_CALL_RESERVE_CREDITS = Math.ceil(
+  Math.max(WEB_SEARCH_RESERVE_USD, FETCH_URL_RESERVE_USD) *
+    CREDITS_PER_USD
+)
 
 /*
  * Abuse protection uses a bounded atomic reservation before the provider
@@ -300,12 +315,12 @@ const MAX_TRANSCRIPT_CHARACTERS_PER_MESSAGE = 2_000
 const TRANSCRIPT_TRUNCATION_MARKER =
   '\n\n[Earlier message content truncated to control repeated context usage.]\n\n'
 
-const IMAGE_INPUT_RESERVE_CREDITS = 20_000
-const CHAT_HIDDEN_INPUT_RESERVE_CREDITS = 4_000
-const WEB_HIDDEN_INPUT_RESERVE_CREDITS = 12_000
-const RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS = 30_000
-const TOOL_CALL_RESERVE_CREDITS = 12_200
-const MINIMUM_OUTPUT_TOKEN_BUDGET = 200
+const IMAGE_INPUT_RESERVE_TOKENS = 20_000
+const CHAT_HIDDEN_INPUT_RESERVE_TOKENS = 256
+const WEB_HIDDEN_INPUT_RESERVE_TOKENS = 12_000
+const RESEARCH_HIDDEN_INPUT_RESERVE_TOKENS = 30_000
+const CHAT_MINIMUM_OUTPUT_TOKEN_BUDGET = 32
+const TOOL_MODE_MINIMUM_OUTPUT_TOKEN_BUDGET = 200
 const WEB_MAX_TOOL_CALLS = 3
 const WEB_MAX_STEPS = 3
 const SEARCH_MAX_TOKENS_PER_PAGE = 1_024
@@ -885,7 +900,7 @@ function toAgentTranscript(
   return selectedMessages
 }
 
-function estimateInputTokenCredits(value: unknown): number {
+function estimateInputTokens(value: unknown): number {
   const serializedValue =
     typeof value === 'string'
       ? value
@@ -908,14 +923,102 @@ function getModeHiddenInputReserve(
   responseMode: ResponseMode
 ): number {
   if (responseMode === 'research') {
-    return RESEARCH_HIDDEN_INPUT_RESERVE_CREDITS
+    return RESEARCH_HIDDEN_INPUT_RESERVE_TOKENS
   }
 
   if (responseMode === 'web_search') {
-    return WEB_HIDDEN_INPUT_RESERVE_CREDITS
+    return WEB_HIDDEN_INPUT_RESERVE_TOKENS
   }
 
-  return CHAT_HIDDEN_INPUT_RESERVE_CREDITS
+  return CHAT_HIDDEN_INPUT_RESERVE_TOKENS
+}
+
+function getReservationPricing(
+  modelKey: string
+): ReservationPricing {
+  const normalizedModelKey = modelKey
+    .trim()
+    .toLowerCase()
+
+  if (normalizedModelKey.includes('claude-sonnet-5')) {
+    return {
+      inputUsdPerMillionTokens: 2,
+      outputUsdPerMillionTokens: 10,
+    }
+  }
+
+  if (
+    normalizedModelKey.includes('claude-sonnet-4-6') ||
+    normalizedModelKey.includes('claude-sonnet-4-5')
+  ) {
+    return {
+      inputUsdPerMillionTokens: 3,
+      outputUsdPerMillionTokens: 15,
+    }
+  }
+
+  if (normalizedModelKey.includes('claude-opus')) {
+    return {
+      inputUsdPerMillionTokens: 5,
+      outputUsdPerMillionTokens: 25,
+    }
+  }
+
+  if (normalizedModelKey.includes('claude-haiku-4-5')) {
+    return {
+      inputUsdPerMillionTokens: 1,
+      outputUsdPerMillionTokens: 5,
+    }
+  }
+
+  if (normalizedModelKey.includes('gemini-3-flash-preview')) {
+    return {
+      inputUsdPerMillionTokens: 0.5,
+      outputUsdPerMillionTokens: 3,
+    }
+  }
+
+  return DEFAULT_RESERVATION_PRICING
+}
+
+function getInputReserveCreditsPerToken(
+  pricing: ReservationPricing,
+  modelKey: string
+): number {
+  /*
+   * Anthropic prompt-cache writes can cost more than ordinary input. Use a
+   * 25% input safety factor for Anthropic reservations; settlement remains
+   * based on exact provider total_cost.
+   */
+  const inputSafetyFactor = modelKey
+    .trim()
+    .toLowerCase()
+    .startsWith('anthropic/')
+    ? 1.25
+    : 1
+
+  return (
+    pricing.inputUsdPerMillionTokens *
+    inputSafetyFactor *
+    CREDITS_PER_USD / 1_000_000
+  )
+}
+
+function getOutputReserveCreditsPerToken(
+  pricing: ReservationPricing
+): number {
+  return (
+    pricing.outputUsdPerMillionTokens *
+    CREDITS_PER_USD / 1_000_000
+  )
+}
+
+function getMinimumOutputTokens(
+  responseMode: ResponseMode
+): number {
+  return responseMode === 'chat'
+    ? CHAT_MINIMUM_OUTPUT_TOKEN_BUDGET
+    : TOOL_MODE_MINIMUM_OUTPUT_TOKEN_BUDGET
 }
 
 function getDesiredOutputTokens(
@@ -2089,31 +2192,57 @@ export async function onRequestPost(
     const minimumToolCalls =
       getMinimumToolCalls(resolvedResponseMode)
 
-    const fixedInputReserveCredits = Math.ceil(
-      (
-        estimateInputTokenCredits(agentInput) +
-        getModeHiddenInputReserve(
-          resolvedResponseMode
-        ) +
-        signedImageUrls.length *
-          IMAGE_INPUT_RESERVE_CREDITS
-      ) * RESERVATION_CREDIT_SCALE
+    const minimumOutputTokens =
+      getMinimumOutputTokens(resolvedResponseMode)
+
+    const reservationPricing =
+      getReservationPricing(resolvedModel.model_key)
+
+    const inputReserveCreditsPerToken =
+      getInputReserveCreditsPerToken(
+        reservationPricing,
+        resolvedModel.model_key
+      )
+
+    const outputReserveCreditsPerToken =
+      getOutputReserveCreditsPerToken(
+        reservationPricing
+      )
+
+    const estimatedInputTokens =
+      estimateInputTokens(agentInput) +
+      getModeHiddenInputReserve(
+        resolvedResponseMode
+      ) +
+      signedImageUrls.length *
+        IMAGE_INPUT_RESERVE_TOKENS
+
+    const fixedInputReserveCredits = Math.max(
+      1,
+      Math.ceil(
+        estimatedInputTokens *
+          inputReserveCreditsPerToken
+      )
     )
 
-    const minimumOutputReserveCredits = Math.ceil(
-      MINIMUM_OUTPUT_TOKEN_BUDGET *
-        RESERVATION_CREDIT_SCALE
+    const minimumOutputReserveCredits = Math.max(
+      1,
+      Math.ceil(
+        minimumOutputTokens *
+          outputReserveCreditsPerToken
+      )
     )
 
-    const desiredOutputReserveCredits = Math.ceil(
-      desiredOutputTokens *
-        RESERVATION_CREDIT_SCALE
+    const desiredOutputReserveCredits = Math.max(
+      minimumOutputReserveCredits,
+      Math.ceil(
+        desiredOutputTokens *
+          outputReserveCreditsPerToken
+      )
     )
 
-    const perToolCallReserveCredits = Math.ceil(
-      TOOL_CALL_RESERVE_CREDITS *
-        RESERVATION_CREDIT_SCALE
-    )
+    const perToolCallReserveCredits =
+      MAX_TOOL_CALL_RESERVE_CREDITS
 
     const minimumRequiredCredits =
       fixedInputReserveCredits +
@@ -2129,7 +2258,7 @@ export async function onRequestPost(
       model: resolvedModel.model_key,
       input: agentInput,
       max_output_tokens:
-        MINIMUM_OUTPUT_TOKEN_BUDGET,
+        minimumOutputTokens,
       stream: true,
       store: false,
       reasoning: {
@@ -2357,14 +2486,13 @@ export async function onRequestPost(
           (
             variableBudgetCredits -
             toolReserveCredits
-          ) / RESERVATION_CREDIT_SCALE
+          ) / outputReserveCreditsPerToken
         )
       )
     )
 
     if (
-      allowedOutputTokens <
-      MINIMUM_OUTPUT_TOKEN_BUDGET
+      allowedOutputTokens < minimumOutputTokens
     ) {
       await releaseCreditReservation()
       await releaseChatRequestSlot()
