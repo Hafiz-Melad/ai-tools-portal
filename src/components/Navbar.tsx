@@ -17,6 +17,10 @@ function Navbar() {
                         AI Tools
                     </a>
 
+                    <a href="#services" className="hover:text-white">
+                        Services
+                    </a>
+
                     <a href="#pricing" className="hover:text-white">
                         Pricing
                     </a>

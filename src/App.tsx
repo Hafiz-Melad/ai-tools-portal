@@ -7,6 +7,7 @@ import {
 import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import Tools from './components/Tools'
+import Services from './components/Services'
 import Plans from './components/Plans'
 import HowItWorks from './components/HowItWorks'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -23,6 +24,7 @@ function Home() {
       <Navbar />
       <Hero />
       <Tools />
+      <Services />
       <Plans />
       <HowItWorks />
     </div>
