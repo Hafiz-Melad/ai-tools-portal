@@ -1,64 +1,56 @@
-const tools = [
+const highlights = [
   {
-    name: 'ChatGPT',
-    description: 'Advanced AI for writing, coding and research',
+    number: '01',
+    title: 'Claude AI Workspace',
+    description:
+      'Use Claude through your private GameTrustHub login with simple credit-based access.',
   },
   {
-    name: 'Claude',
-    description: 'Long documents and deep reasoning',
+    number: '02',
+    title: 'Premium Digital Services',
+    description:
+      'Ask about Spotify Premium, Netflix, ChatGPT and Perplexity service options from one place.',
   },
   {
-    name: 'Grok',
-    description: 'Real-time AI answers and information',
-  },
-  {
-    name: 'Gemini',
-    description: 'Google AI with powerful capabilities',
-  },
-  {
-    name: 'Perplexity',
-    description: 'AI search and research assistant',
+    number: '03',
+    title: 'Direct Human Support',
+    description:
+      'Have a question before ordering? Message GameTrustHub directly on WhatsApp for help.',
   },
 ]
 
 function Tools() {
   return (
-    <section id="tools" className="bg-black text-white py-20 px-6">
-
-      <div className="max-w-6xl mx-auto">
-
-        <h2 className="text-4xl font-bold text-center">
-          Premium AI Tools Included
-        </h2>
-
-        <p className="text-gray-400 text-center mt-4">
-          Access the most popular AI models from one platform.
-        </p>
-
-
-        <div className="grid md:grid-cols-3 gap-6 mt-12">
-
-          {tools.map((tool) => (
-            <div
-              key={tool.name}
-              className="border border-white/10 rounded-2xl p-6 hover:bg-white/5 transition"
-            >
-
-              <h3 className="text-2xl font-semibold">
-                {tool.name}
-              </h3>
-
-              <p className="text-gray-400 mt-3">
-                {tool.description}
-              </p>
-
-            </div>
-          ))}
-
+    <section className="px-6 py-20 text-white">
+      <div className="mx-auto max-w-7xl">
+        <div className="mx-auto max-w-3xl text-center">
+          <p className="text-sm font-bold uppercase tracking-[0.28em] text-cyan-300">
+            Why GameTrustHub
+          </p>
+          <h2 className="mt-4 text-4xl font-black md:text-5xl">
+            Everything you need, without the clutter
+          </h2>
+          <p className="mt-5 text-lg leading-8 text-slate-400">
+            AI access, premium services and direct support are organized around
+            one simple goal: making access easy.
+          </p>
         </div>
 
+        <div className="mt-12 grid gap-6 md:grid-cols-3">
+          {highlights.map((item) => (
+            <article
+              key={item.number}
+              className="rounded-3xl border border-cyan-300/10 bg-gradient-to-br from-cyan-300/[0.06] to-amber-300/[0.025] p-7 shadow-[0_18px_60px_rgba(0,0,0,0.2)]"
+            >
+              <div className="text-sm font-black tracking-[0.18em] text-amber-300">
+                {item.number}
+              </div>
+              <h3 className="mt-5 text-2xl font-bold">{item.title}</h3>
+              <p className="mt-4 leading-7 text-slate-400">{item.description}</p>
+            </article>
+          ))}
+        </div>
       </div>
-
     </section>
   )
 }

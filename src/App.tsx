@@ -20,7 +20,7 @@ import Admin from './pages/AdminPage'
 
 function Home() {
   return (
-    <div className="min-h-screen bg-black">
+    <div className="min-h-screen bg-[#040b16] text-white">
       <Navbar />
       <Hero />
       <Tools />

@@ -5,51 +5,74 @@ type Service = {
   eyebrow: string
   description: string
   accentClass: string
-  message: string
+  actionLabel: string
+  href: string
+  external?: boolean
+}
+
+function createWhatsAppUrl(message: string) {
+  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(message)}`
 }
 
 const services: Service[] = [
   {
+    name: 'Claude AI Workspace',
+    eyebrow: 'AI Workspace',
+    description:
+      'Private Claude access through GameTrustHub. $1 AI credit purchase gives you 100,000 credits.',
+    accentClass: 'from-cyan-300/20 to-cyan-300/5',
+    actionLabel: 'Claude Login',
+    href: '/login',
+  },
+  {
     name: 'Spotify Premium',
     eyebrow: 'Music',
     description:
-      'Premium subscription options with fast, direct support through WhatsApp.',
+      'Contact us for current Spotify Premium availability, options and pricing.',
     accentClass: 'from-emerald-400/20 to-emerald-400/5',
-    message:
-      "Hi, I'm interested in Spotify Premium. Please send me the available options and pricing.",
+    actionLabel: 'Ask on WhatsApp',
+    href: createWhatsAppUrl(
+      "Hi, I'm interested in Spotify Premium. Please send me the available options and pricing."
+    ),
+    external: true,
   },
   {
     name: 'Netflix',
     eyebrow: 'Streaming',
     description:
-      'One month Personal Netflix Accounts.',
+      'Contact us for current Netflix account availability, options and pricing.',
     accentClass: 'from-red-500/20 to-red-500/5',
-    message:
-      "Hi, I'm interested in Netflix. Please send me the available options and pricing.",
+    actionLabel: 'Ask on WhatsApp',
+    href: createWhatsAppUrl(
+      "Hi, I'm interested in Netflix. Please send me the available options and pricing."
+    ),
+    external: true,
   },
   {
     name: 'ChatGPT Plus Shared Account',
     eyebrow: 'AI Service',
     description:
-      'Contact us directly for availability and pricing.',
+      'Contact us directly for current ChatGPT service availability and pricing.',
     accentClass: 'from-teal-400/20 to-teal-400/5',
-    message:
-      "Hi, I'm interested in your ChatGPT service. Please send me the available options and pricing.",
+    actionLabel: 'Ask on WhatsApp',
+    href: createWhatsAppUrl(
+      "Hi, I'm interested in your ChatGPT service. Please send me the available options and pricing."
+    ),
+    external: true,
   },
   {
     name: 'Perplexity Pro Shared Account',
     eyebrow: 'AI Service',
     description:
-      'Get current Perplexity service options and support directly through WhatsApp.',
-    accentClass: 'from-cyan-400/20 to-cyan-400/5',
-    message:
-      "Hi, I'm interested in your Perplexity service. Please send me the available options and pricing.",
+      'Ask about current Perplexity service availability, pricing and support.',
+    accentClass: 'from-sky-400/20 to-sky-400/5',
+    actionLabel: 'Ask on WhatsApp',
+    href: createWhatsAppUrl(
+      "Hi, I'm interested in your Perplexity service. Please send me the available options and pricing."
+    ),
+    external: true,
   },
 ]
-
-function createWhatsAppUrl(message: string) {
-  return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(message)}`
-}
 
 function WhatsAppIcon({ className = 'h-5 w-5' }: { className?: string }) {
   return (
@@ -70,69 +93,66 @@ function WhatsAppIcon({ className = 'h-5 w-5' }: { className?: string }) {
 
 function Services() {
   const generalSupportUrl = createWhatsAppUrl(
-    "Hi, I visited your website and I'd like some help with your services."
+    "Hi, I visited GameTrustHub and I'd like help with your services."
   )
 
   return (
     <>
-      <section id="services" className="bg-black px-6 py-20 text-white">
+      <section id="services" className="px-6 py-20 text-white">
         <div className="mx-auto max-w-7xl">
           <div className="mx-auto max-w-3xl text-center">
-            <p className="text-sm font-semibold uppercase tracking-[0.24em] text-emerald-400">
-              More Services
+            <p className="text-sm font-bold uppercase tracking-[0.28em] text-amber-300">
+              GameTrustHub Services
             </p>
-
-            <h2 className="mt-4 text-4xl font-bold md:text-5xl">
-              Premium services, one message away
+            <h2 className="mt-4 text-4xl font-black md:text-5xl">
+              AI access and premium services in one place
             </h2>
-
-            <p className="mt-4 text-lg leading-8 text-gray-400">
-              Looking for something beyond the AI portal? Contact us on WhatsApp
-              for current availability, pricing and support.
+            <p className="mt-5 text-lg leading-8 text-slate-400">
+              Open your Claude workspace directly or message us on WhatsApp for
+              current availability, pricing and support on other services.
             </p>
           </div>
 
-          <div className="mt-12 grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+          <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             {services.map((service) => (
               <article
                 key={service.name}
-                className="group relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] p-6 transition duration-300 hover:-translate-y-1 hover:border-white/20 hover:bg-white/[0.055]"
+                className="group relative overflow-hidden rounded-3xl border border-white/10 bg-white/[0.035] p-6 transition duration-300 hover:-translate-y-1 hover:border-cyan-300/25 hover:bg-white/[0.055]"
               >
                 <div
-                  className={`pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b ${service.accentClass} opacity-80`}
+                  className={`pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b ${service.accentClass} opacity-90`}
                 />
 
                 <div className="relative flex h-full flex-col">
-                  <span className="w-fit rounded-full border border-white/10 bg-black/30 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-gray-400">
+                  <span className="w-fit rounded-full border border-white/10 bg-[#04101d]/70 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-300">
                     {service.eyebrow}
                   </span>
 
-                  <h3 className="mt-6 text-2xl font-semibold leading-tight">
+                  <h3 className="mt-6 text-xl font-bold leading-tight">
                     {service.name}
                   </h3>
 
-                  <p className="mt-3 flex-1 text-sm leading-6 text-gray-400">
+                  <p className="mt-3 flex-1 text-sm leading-6 text-slate-400">
                     {service.description}
                   </p>
 
                   <a
-                    href={createWhatsAppUrl(service.message)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-7 inline-flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-gray-200"
-                    aria-label={`Contact us on WhatsApp about ${service.name}`}
+                    href={service.href}
+                    target={service.external ? '_blank' : undefined}
+                    rel={service.external ? 'noreferrer' : undefined}
+                    className="mt-7 inline-flex items-center justify-center gap-2 rounded-xl border border-cyan-300/20 bg-cyan-300/10 px-4 py-3 text-sm font-bold text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-300/15"
                   >
-                    <WhatsAppIcon />
-                    Contact on WhatsApp
+                    {service.external ? <WhatsAppIcon /> : null}
+                    {service.actionLabel}
                   </a>
                 </div>
               </article>
             ))}
           </div>
 
-          <p className="mt-8 text-center text-xs leading-5 text-gray-600">
-            Availability and service terms may vary. Product and brand names belong
-            to their respective owners.
+          <p className="mt-8 text-center text-xs leading-5 text-slate-600">
+            Availability and service terms may vary. Product and brand names
+            belong to their respective owners.
           </p>
         </div>
       </section>
@@ -141,11 +161,11 @@ function Services() {
         href={generalSupportUrl}
         target="_blank"
         rel="noreferrer"
-        className="fixed bottom-5 right-5 z-50 inline-flex items-center gap-3 rounded-full bg-[#25D366] px-5 py-3 font-semibold text-black shadow-[0_18px_50px_rgba(0,0,0,0.45)] transition hover:scale-[1.03] hover:bg-[#2be475] focus:outline-none focus:ring-2 focus:ring-white/80 md:bottom-7 md:right-7"
-        aria-label="Chat with us on WhatsApp"
+        className="fixed bottom-5 right-5 z-50 inline-flex items-center gap-3 rounded-full bg-[#25D366] px-5 py-3 font-bold text-black shadow-[0_18px_50px_rgba(0,0,0,0.45)] transition hover:scale-[1.03] hover:bg-[#2be475] focus:outline-none focus:ring-2 focus:ring-white/80 md:bottom-7 md:right-7"
+        aria-label="Chat with GameTrustHub on WhatsApp"
       >
         <WhatsAppIcon className="h-6 w-6" />
-        <span className="hidden sm:inline">Chat on WhatsApp</span>
+        <span className="hidden sm:inline">WhatsApp Support</span>
       </a>
     </>
   )
