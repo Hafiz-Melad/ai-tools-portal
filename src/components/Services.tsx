@@ -72,6 +72,18 @@ const services: Service[] = [
     ),
     external: true,
   },
+  {
+    name: 'TikTok Coins',
+    eyebrow: 'Social Media',
+    description:
+      'Contact us on WhatsApp for current TikTok Coins options, availability and pricing.',
+    accentClass: 'from-fuchsia-400/20 to-cyan-300/5',
+    actionLabel: 'Ask on WhatsApp',
+    href: createWhatsAppUrl(
+      "Hi, I'm interested in TikTok Coins. Please send me the available options and pricing."
+    ),
+    external: true,
+  },
 ]
 
 function WhatsAppIcon({ className = 'h-5 w-5' }: { className?: string }) {
@@ -113,7 +125,7 @@ function Services() {
             </p>
           </div>
 
-          <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          <div className="mt-12 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {services.map((service) => (
               <article
                 key={service.name}

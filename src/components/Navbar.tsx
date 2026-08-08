@@ -27,6 +27,13 @@ function Navbar() {
             Services
           </a>
           <a
+            href="#stores"
+            className="rounded-xl border border-amber-300/20 bg-amber-300/[0.06] px-3 py-2 font-semibold text-amber-100 transition hover:border-amber-300/40 hover:bg-amber-300/10"
+          >
+            <span className="sm:hidden">Stores</span>
+            <span className="hidden sm:inline">Our Stores</span>
+          </a>
+          <a
             href="/login"
             className="rounded-xl border border-cyan-300/20 bg-cyan-300/5 px-4 py-2 text-cyan-100 transition hover:border-cyan-300/40 hover:bg-cyan-300/10"
           >

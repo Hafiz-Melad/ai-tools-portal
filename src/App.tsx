@@ -8,6 +8,7 @@ import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import Tools from './components/Tools'
 import Services from './components/Services'
+import Marketplaces from './components/Marketplaces'
 import Plans from './components/Plans'
 import HowItWorks from './components/HowItWorks'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -25,6 +26,7 @@ function Home() {
       <Hero />
       <Tools />
       <Services />
+      <Marketplaces />
       <Plans />
       <HowItWorks />
     </div>
